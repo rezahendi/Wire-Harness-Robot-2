@@ -1,0 +1,33 @@
+# Longer S-shaped route with four forks.
+# KNOWN HARD CASE: once F2 is routed, the free wire lies within 2-3 cm of F3, and the
+# taut carry over F3 snags on it. The scripted planner and the original expert both
+# fail here today (carry-over force limit, three attempts). It is kept as a target for
+# the agent and for a "clear the wire from a fork" skill.
+harness:
+  name: Seat sub-harness SH-12
+  revision: A
+  notes: Route W1 from CL1 through F1-F4 and seat X2.
+board:
+  size_mm: [1000, 440]
+clamp:
+  id: CL1
+  at_mm: [150, 120]
+forks:
+  - {id: F1, at_mm: [260, 250]}
+  - {id: F2, at_mm: [400, 330]}
+  - {id: F3, at_mm: [560, 300]}
+  - {id: F4, at_mm: [700, 200]}
+connectors:
+  - id: X2
+    holder_at_mm: [820, 150]
+    part_number: X2-4P-15
+    description: 4-way plug, 1.5 mm terminals
+wires:
+  - id: W1
+    part_number: FLRY-B 4x0.5 taped bundle
+    diameter_mm: 6.0
+    stiffness: nominal
+    slack_mm: 80
+    from: CL1
+    route: [F1, F2, F3, F4]
+    to: X2

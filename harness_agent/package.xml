@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>harness_agent</name>
+  <version>0.1.0</version>
+  <description>Agentic layer of the wire-harness cell: harness specs and drawings, the robot's skills as tools, and a Nemotron planner on Nebius Token Factory that builds a harness step by step.</description>
+  <maintainer email="rezahendi590@gmail.com">Reza</maintainer>
+  <license>Apache-2.0</license>
+
+  <exec_depend>harness_core</exec_depend>
+  <exec_depend>harness_learning</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+  <exec_depend>python3-matplotlib</exec_depend>
+  <!-- the Token Factory client uses only the Python standard library -->
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

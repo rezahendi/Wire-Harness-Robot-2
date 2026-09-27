@@ -1,0 +1,15 @@
+# Route the wire through all forks of the formboard and seat its connector.
+bool skip_connector      # stop after the last fork
+float64 timeout          # [s]; <= 0 means the node's default
+---
+bool success
+bool[] forks_routed
+bool connector_seated
+float64 duration         # [s] (ROS time)
+string message
+---
+string phase             # e.g. pick_descend, route_seat, connector_search
+int32 current_fork       # -1 while handling the connector
+float64 wire_tension     # [N], horizontal pull on the gripper
+float64 contact_force    # [N], |F| at the TCP
+float64 elapsed          # [s]

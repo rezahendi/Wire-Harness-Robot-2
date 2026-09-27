@@ -1,0 +1,30 @@
+# Door-module sub-harness, one taped bundle. Positions are board millimetres:
+# u along the long edge, v along the short edge, origin at the lower-left corner,
+# robot below the lower edge. This is the cell's nominal layout.
+harness:
+  name: Door module sub-harness DM-07
+  revision: B
+  notes: Route W1 from clamp CL1 through F1-F3 and seat X1 in its holder.
+board:
+  size_mm: [1000, 440]
+clamp:
+  id: CL1
+  at_mm: [260, 80]
+forks:
+  - {id: F1, at_mm: [340, 220]}
+  - {id: F2, at_mm: [480, 320]}
+  - {id: F3, at_mm: [630, 280]}
+connectors:
+  - id: X1
+    holder_at_mm: [720, 180]
+    part_number: X1-2P-28
+    description: 2-way sealed plug, 2.8 mm terminals
+wires:
+  - id: W1
+    part_number: FLRY-B 6x0.35 taped bundle
+    diameter_mm: 6.0
+    stiffness: nominal
+    slack_mm: 75
+    from: CL1
+    route: [F1, F2, F3]
+    to: X1

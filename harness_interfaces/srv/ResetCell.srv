@@ -1,0 +1,7 @@
+# Rebuild the cell with a new layout / wire and put the robot back home.
+int64 seed          # < 0: pick a random seed
+bool randomize      # sample fork / holder / wire variations
+---
+bool success
+int64 seed
+string message

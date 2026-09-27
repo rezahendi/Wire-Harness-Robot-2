@@ -1,0 +1,26 @@
+# Short route with a stiffer bundle.
+harness:
+  name: Mirror sub-harness MR-03
+  revision: C
+board:
+  size_mm: [1000, 440]
+clamp:
+  id: CL1
+  at_mm: [300, 100]
+forks:
+  - {id: F1, at_mm: [420, 260]}
+  - {id: F2, at_mm: [600, 300]}
+connectors:
+  - id: X3
+    holder_at_mm: [740, 200]
+    part_number: X3-2P-28
+    description: 2-way plug, 2.8 mm terminals
+wires:
+  - id: W1
+    part_number: FLRY-B 8x0.35 taped bundle
+    diameter_mm: 6.0
+    stiffness: stiff
+    slack_mm: 70
+    from: CL1
+    route: [F1, F2]
+    to: X3

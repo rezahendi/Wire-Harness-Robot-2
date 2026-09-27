@@ -1,0 +1,169 @@
+Panels:
+- Class: rviz_common/Displays
+  Help Height: 0
+  Name: Displays
+  Property Tree Widget:
+    Expanded:
+    - /Global Options1
+    Splitter Ratio: 0.5
+  Tree Height: 400
+Visualization Manager:
+  Class: ''
+  Displays:
+  - Alpha: 0.4
+    Cell Size: 0.1
+    Class: rviz_default_plugins/Grid
+    Color: 160; 160; 164
+    Enabled: true
+    Line Style:
+      Line Width: 0.03
+      Value: Lines
+    Name: Grid
+    Normal Cell Count: 0
+    Offset:
+      X: 0
+      Y: 0
+      Z: 0
+    Plane: XY
+    Plane Cell Count: 20
+    Reference Frame: <Fixed Frame>
+    Value: true
+  - Alpha: 1
+    Class: rviz_default_plugins/RobotModel
+    Collision Enabled: false
+    Description File: ''
+    Description Source: Topic
+    Description Topic:
+      Depth: 5
+      Durability Policy: Transient Local
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /robot_description
+    Enabled: true
+    Links:
+      All Links Enabled: true
+      Expand Joint Details: false
+      Expand Link Details: false
+      Expand Tree: false
+      Link Tree Style: Links in Alphabetic Order
+    Mass Properties:
+      Inertia: false
+      Mass: false
+    Name: Robot (UR5e-class + F/T + gripper)
+    TF Prefix: ''
+    Update Interval: 0
+    Value: true
+    Visual Enabled: true
+  - Class: rviz_default_plugins/MarkerArray
+    Enabled: true
+    Name: Formboard, forks, holder, wire
+    Namespaces: {}
+    Topic:
+      Depth: 5
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /harness/markers
+    Value: true
+  - Accept NaN Values: false
+    Alpha: 1
+    Arrow Width: 0.3
+    Class: rviz_default_plugins/Wrench
+    Enabled: true
+    Force Arrow Scale: 0.02
+    Force Color: 204; 51; 51
+    History Length: 1
+    Name: Wrist F/T wrench
+    Topic:
+      Depth: 5
+      Durability Policy: Volatile
+      Filter size: 10
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /force_torque_sensor_broadcaster/wrench
+    Torque Arrow Scale: 0.1
+    Torque Color: 204; 204; 51
+    Value: true
+  - Alpha: 1
+    Axes Length: 0.05
+    Axes Radius: 0.004
+    Class: rviz_default_plugins/Pose
+    Color: 255; 25; 0
+    Enabled: true
+    Head Length: 0.3
+    Head Radius: 0.1
+    Name: Compliance target
+    Shaft Length: 1
+    Shaft Radius: 0.05
+    Shape: Axes
+    Topic:
+      Depth: 5
+      Durability Policy: Volatile
+      Filter size: 10
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /cartesian_compliance_controller/target_frame
+    Value: true
+  - Class: rviz_default_plugins/TF
+    Enabled: false
+    Frame Timeout: 15
+    Frames:
+      All Enabled: true
+    Marker Scale: 0.3
+    Name: TF
+    Show Arrows: false
+    Show Axes: true
+    Show Names: true
+    Tree: {}
+    Update Interval: 0
+    Value: false
+  Enabled: true
+  Global Options:
+    Background Color: 48; 48; 48
+    Fixed Frame: world
+    Frame Rate: 30
+  Name: root
+  Tools:
+  - Class: rviz_default_plugins/Interact
+    Hide Inactive Objects: true
+  - Class: rviz_default_plugins/MoveCamera
+  - Class: rviz_default_plugins/Select
+  - Class: rviz_default_plugins/FocusCamera
+  - Class: rviz_default_plugins/Measure
+    Line color: 128; 128; 0
+  Transformation:
+    Current:
+      Class: rviz_default_plugins/TF
+  Value: true
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 1.9
+      Enable Stereo Rendering:
+        Stereo Eye Separation: 0.06
+        Stereo Focal Distance: 1
+        Swap Stereo Eyes: false
+        Value: false
+      Focal Point:
+        X: 0.38
+        Y: 0.0
+        Z: 0.12
+      Focal Shape Fixed Size: true
+      Focal Shape Size: 0.05
+      Invert Z Axis: false
+      Name: Current View
+      Near Clip Distance: 0.01
+      Pitch: 0.62
+      Target Frame: <Fixed Frame>
+      Value: Orbit (rviz)
+      Yaw: 5.6
+    Saved: null
+Window Geometry:
+  Displays:
+    collapsed: false
+  Height: 860
+  Hide Left Dock: false
+  Hide Right Dock: true
+  Width: 1400
+  X: 60
+  Y: 40

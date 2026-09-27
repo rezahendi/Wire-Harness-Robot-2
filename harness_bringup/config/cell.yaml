@@ -1,0 +1,203 @@
+cell:
+  wire:
+    radius: 0.003
+    segment_length: 0.03
+    slack: 0.075
+    density: 2500.0
+    bend_modulus: 2000000.0
+    twist_modulus: 1300000.0
+    joint_damping: 0.0005
+    joint_armature: 1.0e-05
+    friction: 0.5
+    clamp_height: 0.033
+  fork:
+    post_height: 0.03
+    prong_height: 0.028
+    slot_width: 0.013
+    prong_thickness: 0.004
+    depth: 0.005
+    lip_radius: 0.003
+    lip_gap: 0.0025
+    spring_stiffness: 150.0
+    spring_preload: 0.002
+    jaw_travel: 0.0065
+    damping: 0.5
+    armature: 0.01
+  connector:
+    length: 0.024
+    width: 0.016
+    height: 0.016
+    mass: 0.008
+  holder:
+    clearance: 0.0008
+    floor_height: 0.0015
+    end_wall_height: 0.012
+    rail_height: 0.003
+    wall_thickness: 0.006
+    wire_slot_width: 0.01
+    chamfer: 0.0035
+    latch: true
+    latch_depth: 0.0008
+    latch_offset: 0.0015
+  layout:
+    board_center:
+    - 0.48
+    - 0.0
+    board_size:
+    - 0.44
+    - 1.0
+    board_thickness: 0.02
+    anchor_xy:
+    - 0.34
+    - -0.24
+    fork_xy:
+    - - 0.48
+      - -0.16
+    - - 0.58
+      - -0.02
+    - - 0.54
+      - 0.13
+    holder_xy:
+    - 0.44
+    - 0.22
+    initial_turn: 1.15
+    initial_arc_radius: 0.09
+    initial_straight_bend: 0.0
+  robot:
+    dh_d:
+    - 0.1625
+    - 0.0
+    - 0.0
+    - 0.1333
+    - 0.0997
+    - 0.0996
+    dh_a:
+    - 0.0
+    - -0.425
+    - -0.3922
+    - 0.0
+    - 0.0
+    - 0.0
+    dh_alpha:
+    - 1.5707963267948966
+    - 0.0
+    - 0.0
+    - 1.5707963267948966
+    - -1.5707963267948966
+    - 0.0
+    joint_names:
+    - shoulder_pan_joint
+    - shoulder_lift_joint
+    - elbow_joint
+    - wrist_1_joint
+    - wrist_2_joint
+    - wrist_3_joint
+    joint_limits:
+    - 6.283
+    - 6.283
+    - 3.1416
+    - 6.283
+    - 6.283
+    - 6.283
+    joint_vel_limits:
+    - 3.14
+    - 3.14
+    - 3.14
+    - 3.14
+    - 3.14
+    - 3.14
+    joint_torque_limits:
+    - 150.0
+    - 150.0
+    - 150.0
+    - 28.0
+    - 28.0
+    - 28.0
+    servo_kp:
+    - 20000.0
+    - 20000.0
+    - 12000.0
+    - 4000.0
+    - 4000.0
+    - 3000.0
+    servo_kv:
+    - 600.0
+    - 600.0
+    - 300.0
+    - 60.0
+    - 60.0
+    - 40.0
+    armature:
+    - 0.3
+    - 0.3
+    - 0.15
+    - 0.04
+    - 0.04
+    - 0.03
+    home_q:
+    - -0.3007
+    - -1.6761
+    - 1.9752
+    - -1.8698
+    - -1.5708
+    - -1.8715
+    ft_thickness: 0.0375
+    gripper_mass: 0.65
+    tcp_offset: 0.17
+    finger_stroke: 0.03
+    finger_speed: 0.075
+    grip_force: 30.0
+    pad_friction: 1.2
+  controller:
+    kp_lin: 6.0
+    kp_rot: 5.0
+    kf_lin: 0.002
+    kf_rot: 0.08
+    max_lin_vel: 0.25
+    max_rot_vel: 1.2
+    max_lin_acc: 2.0
+    max_rot_acc: 8.0
+    force_deadband: 0.4
+    torque_deadband: 0.03
+    wrench_filter_hz: 40.0
+    damping_lambda: 0.02
+    protective_stop_force: 120.0
+    protective_stop_torque: 10.0
+  sim:
+    timestep: 0.001
+    control_dt: 0.002
+    policy_dt: 0.05
+    episode_time: 90.0
+  noise:
+    ft_force_std: 0.05
+    ft_torque_std: 0.004
+    ft_bias_force: 0.3
+    ft_bias_torque: 0.02
+    cable_point_std: 0.0008
+    holder_pose_std: 0.0015
+    holder_yaw_std: 0.01
+  randomization:
+    enabled: true
+    anchor_pos: 0.008
+    fork_pos: 0.012
+    fork_yaw: 0.1
+    holder_pos: 0.012
+    holder_yaw: 0.1
+    initial_turn:
+    - 0.95
+    - 1.35
+    initial_arc_radius:
+    - 0.07
+    - 0.12
+    initial_straight_bend:
+    - -0.4
+    - 0.5
+    bend_scale:
+    - 0.6
+    - 1.3
+    friction_scale:
+    - 0.8
+    - 1.25
+    slack:
+    - 0.06
+    - 0.09

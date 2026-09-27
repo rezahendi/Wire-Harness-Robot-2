@@ -1,0 +1,26 @@
+# Deliberately unbuildable: the agent should refuse it and say why.
+harness:
+  name: Test board - infeasible
+  revision: X
+board:
+  size_mm: [1000, 440]
+clamp:
+  id: CL1
+  at_mm: [260, 80]
+forks:
+  - {id: F1, at_mm: [340, 220]}
+  - {id: F2, at_mm: [380, 240]}
+  - {id: F3, at_mm: [300, 380]}
+connectors:
+  - id: X1
+    holder_at_mm: [960, 420]
+    part_number: X1-2P-28
+wires:
+  - id: W1
+    part_number: FLRY-B 6x0.35 taped bundle
+    diameter_mm: 6.0
+    stiffness: nominal
+    slack_mm: 30
+    from: CL1
+    route: [F1, F2, F3]
+    to: X1
