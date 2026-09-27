@@ -3,11 +3,15 @@
     python -m harness_agent.run_build --spec specs/demo_3fork.yaml --planner nemotron
     python -m harness_agent.run_build --spec specs/demo_4fork.yaml --planner scripted --video
     python -m harness_agent.run_build --spec specs/demo_3fork.yaml --planner expert --seed 7 --randomize
+    python -m harness_agent.run_build --spec specs/demo_3fork.yaml --planner nemotron --vision
 
 Planners:
     nemotron   Nemotron on Nebius Token Factory decides every step (needs NEBIUS_API_KEY)
     scripted   the same decisions hard-coded, through the same tools
     expert     the original monolithic expert with its built-in recoveries (baseline)
+
+--vision adds the camera check: every inspection photographs the fixtures and a vision
+model on Token Factory gives its verdict next to perception's (images in inspection/).
 """
 
 from __future__ import annotations
@@ -71,10 +75,37 @@ def write_report(path: str, spec, result: Dict[str, Any], session) -> None:
                          f"{c.get('sim_time', '')} s |")
         lines.append("")
     lines += ["## Planner report", "", result.get("report") or "(none)", ""]
+    checks = getattr(session, "visual_checks", None) or []
+    if checks:
+        agree = sum(c["verdict"]["seated"] == c["truth"] for c in checks)
+        lines += ["## Visual inspection", "",
+                  f"{len(checks)} camera checks by `{checks[0]['verdict']['model']}`; the vision verdict "
+                  f"matched ground truth in {agree}, perception in "
+                  f"{sum(c['perceived'] == c['truth'] for c in checks)}.", "",
+                  "| # | target | vision (confidence) | perception | truth | evidence |", "|---|---|---|---|---|---|"]
+
+        def word(v):
+            return "no answer" if v is None else ("seated" if v else "NOT seated")
+
+        for k, c in enumerate(checks, 1):
+            v = c["verdict"]
+            img = f"[{c['target']}](inspection/{v['image']})" if v.get("image") else c["target"]
+            lines.append(f"| {k} | {img} | {word(v['seated'])} ({v['confidence']:.2f}) | {word(c['perceived'])} | "
+                         f"{word(c['truth'])} | {(v.get('evidence') or v.get('error') or '').replace('|', '/')} |")
+        lines.append("")
+        last = {}
+        for c in checks:
+            last[c["target"]] = c
+        shots = [c["verdict"]["image"] for c in last.values() if c["verdict"].get("image")]
+        lines += [f"![{os.path.splitext(n)[0]}](inspection/{n})" for n in shots] + [""]
     if result.get("usage"):
         u = result["usage"]
         lines += ["## Model usage", "", f"{u.get('calls', 0)} calls, {u.get('prompt_tokens', 0)} prompt + "
                   f"{u.get('completion_tokens', 0)} completion tokens, {u.get('seconds', 0)} s", ""]
+        for model, m in (u.get("per_model") or {}).items():
+            lines.append(f"* `{model}`: {m['calls']} calls, {m['prompt_tokens']} + {m['completion_tokens']} "
+                         f"tokens, {m['seconds']:.1f} s")
+        lines.append("")
     with open(path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
 
@@ -88,9 +119,12 @@ def main(argv: Optional[list] = None) -> int:
     ap.add_argument("--randomize", action="store_true", help="perturb the layout and wire around the spec")
     ap.add_argument("--max-turns", type=int, default=40)
     ap.add_argument("--video", action="store_true", help="also write video.mp4 (slower)")
+    ap.add_argument("--vision", action="store_true",
+                    help="camera check: a Token Factory vision model inspects each fixture too")
+    ap.add_argument("--vision-model", default=None, help="vision model id (default: picked automatically)")
     ap.add_argument("--out", default=None, help="output directory (default: runs/<spec>_<planner>_<seed>)")
     args = ap.parse_args(argv)
-    if args.video:
+    if args.video or args.vision:
         from harness_core.render_util import choose_gl_backend
         choose_gl_backend()
 
@@ -104,27 +138,43 @@ def main(argv: Optional[list] = None) -> int:
     out = args.out or os.path.join("runs", f"{name}_{args.planner}_{args.seed}")
     os.makedirs(out, exist_ok=True)
     render_drawing(spec, os.path.join(out, "drawing.png"))
+    client, inspector = None, None
+    if args.planner == "nemotron" or args.vision:
+        from .llm import TokenFactoryClient
+        client = TokenFactoryClient()
+    if args.vision:
+        from .vision import VisualInspector
+        inspector = VisualInspector(client=client, model=args.vision_model)
     session = CellSession(spec, seed=args.seed, randomize=args.randomize, render=args.video,
-                          frame_every=0.25)
+                          frame_every=0.25, inspector=inspector,
+                          inspection_dir=os.path.join(out, "inspection") if inspector else None)
     print(f"{spec.name} rev {spec.revision}: route {' > '.join(session.route)} > {session.connector_id}, "
           f"planner {args.planner}, seed {args.seed}")
     for i in session.issues:
         print(f"  {i.severity}: {i.message}")
+    if inspector is not None:
+        print(f"  camera check: {inspector.model}")
 
     if args.planner == "expert":
         if not session.feasible:
             print("spec failed validation; the expert cannot run")
             return 1
         result = run_expert(session)
+        if inspector is not None:                        # the expert does not inspect: do it after
+            session.retreat()
+            result["final_inspection"] = session.inspect("all")
     elif args.planner == "scripted":
         result = ScriptedPlanner(session).run(args.max_turns).as_dict()
     else:
-        planner = NemotronPlanner(session, model=args.model)
+        planner = NemotronPlanner(session, client=client, model=args.model)
         print(f"  model: {planner.model}")
         result = planner.run(args.max_turns).as_dict()
 
     result["events"] = session.events
     result["session"] = session.summary()
+    result["visual_checks"] = session.visual_checks
+    if client is not None and not result.get("usage"):
+        result["usage"] = client.usage.as_dict()
     with open(os.path.join(out, "trace.json"), "w", encoding="utf-8") as f:
         json.dump(_jsonable(result), f, indent=1)
     write_report(os.path.join(out, "report.md"), spec, result, session)

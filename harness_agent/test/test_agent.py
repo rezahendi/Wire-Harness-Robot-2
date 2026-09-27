@@ -60,4 +60,5 @@ def test_agent_loop_builds_the_nominal_harness():
     session = CellSession(spec("demo_3fork"), seed=0)
     res = NemotronPlanner(session, client=ScriptedLLM(session.route, session.connector_id), model="stub").run()
     assert res.success and res.claimed_success
-    assert res.tool_calls[-1]["name"] == "finish"
+    assert [c["name"] for c in res.tool_calls[-2:]] == ["inspect", "finish"]
+    assert res.refused_verdicts == 0

@@ -38,12 +38,21 @@ How a build works:
    seated in the holder.
 2. Route forks strictly in order. A fork can only be routed when every earlier fork holds
    the wire, because the wire is anchored at the previous fork.
-3. After every skill, read the returned state. If a fork that held the wire before has lost
-   it, route that fork again before going on.
+3. Every skill result contains the new state of the cell; read it before the next step
+   (get_status is only needed for a fresh look). If a fork that held the wire before has
+   lost it, route that fork again before going on.
 4. Seat the connector only when every fork holds the wire. If it stands on its end, tip it
    over. If it lies against a fork, relocate it. Then insert it.
-5. Finish by retreating the arm, inspecting everything, and calling finish with an honest
-   verdict based on the inspection.
+5. Finish in three calls: retreat, inspect with target 'all', then finish with an honest
+   verdict based on that inspection. The cell refuses finish(success=true) unless an
+   inspection of everything since the last skill shows every fixture seated.
+
+Inspection:
+- Perception (the tracked wire and connector pose) is the primary check and decides the
+  verdict. The camera check, when it is on, is a second opinion from a vision model.
+- If the two disagree about a fixture, inspect that fixture once more: the camera takes
+  new angles. If they still disagree, keep the verdict from perception and list the
+  fixture in the report as flagged for a manual visual check.
 
 Recovery:
 - carry_over_force_limit: the wire went taut while carried. Retry with attempt + 1 (more
@@ -75,6 +84,7 @@ class BuildResult:
     usage: Dict[str, Any] = field(default_factory=dict)
     model: str = ""
     error: str = ""
+    refused_verdicts: int = 0            # finish(success=true) calls refused for lack of evidence
 
     @property
     def success(self) -> bool:
@@ -85,7 +95,7 @@ class BuildResult:
                 "success": self.success, "report": self.report, "truth": self.truth,
                 "sim_time": round(self.sim_time, 1), "wall_time": round(self.wall_time, 1),
                 "turns": self.turns, "tool_calls": self.tool_calls, "messages": self.messages,
-                "usage": self.usage, "error": self.error}
+                "usage": self.usage, "error": self.error, "refused_verdicts": self.refused_verdicts}
 
 
 def opening_message(session: CellSession) -> str:
@@ -111,12 +121,24 @@ class ScriptedPolicy:
         self.attempts: Dict[str, int] = {}
         self.inserts = 0
         self.stage = "start"
+        self.inspection: Optional[Dict[str, Any]] = None
+        self.flagged: List[str] = []
 
     def next(self, last: Optional[Dict[str, Any]], feasible: bool) -> Tuple[str, Dict[str, Any]]:
         if not feasible:
             return "finish", {"success": False, "report": "The spec failed validation; nothing was built."}
+        if self.stage == "rechecking":
+            self.flagged = list((last or {}).get("disagreements") or [])
+            ok = self._inspection_ok(self.inspection)
+            return "finish", {"success": ok, "report": self._report(ok)}
         if self.stage == "finishing":
+            self.inspection = last
             ok = self._inspection_ok(last)
+            disagree = list((last or {}).get("disagreements") or [])
+            if disagree:
+                self.stage = "rechecking"
+                target = disagree[0] if len(disagree) == 1 else "all"
+                return "inspect", {"target": target}
             return "finish", {"success": ok, "report": self._report(ok)}
         if self.stage == "retreated":
             self.stage = "finishing"
@@ -155,8 +177,11 @@ class ScriptedPolicy:
 
     def _report(self, ok: bool) -> str:
         att = ", ".join(f"{f}: {n}" for f, n in self.attempts.items())
-        return (f"{'Complete' if ok else 'Incomplete'}. Fork attempts {att}; "
+        text = (f"{'Complete' if ok else 'Incomplete'}. Fork attempts {att}; "
                 f"connector insertions {self.inserts}.")
+        if self.flagged:
+            text += f" Flagged for a manual visual check: {', '.join(self.flagged)}."
+        return text
 
 
 class ScriptedPlanner:
@@ -276,7 +301,8 @@ def _result(name: str, model: str, box: ToolBox, session: CellSession, t0: float
     return BuildResult(planner=name, claimed_success=fin.get("success"), report=fin.get("report", ""),
                        truth=session.truth() if session.env is not None else {"success": False},
                        sim_time=session.sim_time, wall_time=time.perf_counter() - t0, turns=turns,
-                       tool_calls=box.calls, messages=transcript, usage=usage, model=model)
+                       tool_calls=box.calls, messages=transcript, usage=usage, model=model,
+                       refused_verdicts=box.refused_verdicts)
 
 
 def _fmt_args(args: Optional[Dict[str, Any]]) -> str:

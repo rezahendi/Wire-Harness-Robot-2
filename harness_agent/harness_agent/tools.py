@@ -42,7 +42,9 @@ def tool_schemas(route: List[str], connector_id: str) -> List[Dict[str, Any]]:
            f"Grasp connector {connector_id}, approach its holder from behind, find the pocket with a "
            "force-controlled spiral search and press it home. Only when every fork holds the wire."),
         fn("inspect",
-           "Look at the board and check a target: a fork id, the connector id, or 'all'.",
+           "Check a target: a fork id, the connector id, or 'all'. Returns what perception measures "
+           "and, when the camera check is on, a vision verdict per fixture (seated, confidence, "
+           "evidence) plus the fixtures where the two disagree. Asking again takes new camera angles.",
            {"target": {"type": "string", "description": f"one of {route + [connector_id, 'all']}"}},
            ["target"]),
         fn("retreat", "Move the arm up and back to its home pose, clear of the board."),
@@ -57,8 +59,16 @@ def tool_schemas(route: List[str], connector_id: str) -> List[Dict[str, Any]]:
     ]
 
 
+PHYSICAL_TOOLS = ("route_fork", "tip_connector", "relocate_connector", "insert_connector", "retreat")
+
+
 class ToolBox:
-    """Dispatches tool calls to a CellSession, with budgets and argument checks."""
+    """Dispatches tool calls to a CellSession, with budgets and argument checks.
+
+    It also holds the model to evidence: ``finish(success=true)`` is refused unless an
+    inspection of everything, made after the last physical skill, shows every fixture
+    seated. A planner cannot talk its way to a success verdict.
+    """
 
     def __init__(self, session: CellSession, max_fork_calls: int = 12, max_connector_calls: int = 8):
         self.session = session
@@ -68,6 +78,8 @@ class ToolBox:
         self.connector_calls = 0
         self.finished: Optional[Dict[str, Any]] = None
         self.calls: List[Dict[str, Any]] = []
+        self.last_inspection: Optional[Dict[str, Any]] = None   # inspect('all') since the last skill
+        self.refused_verdicts = 0
         self._handlers: Dict[str, Callable[..., Any]] = {
             "get_status": self._status,
             "route_fork": self._route_fork,
@@ -90,6 +102,8 @@ class ToolBox:
                 out = handler(**(arguments or {}))
             except TypeError as exc:
                 out = {"error": f"bad arguments for {name}: {exc}"}
+            if name in PHYSICAL_TOOLS:
+                self.last_inspection = None           # the cell changed: earlier evidence is stale
         self.calls.append({"name": name, "arguments": arguments, "result": out,
                            "sim_time": round(self.session.sim_time, 2)})
         return out
@@ -121,12 +135,37 @@ class ToolBox:
         return self._connector_budget() or self.session.insert_connector().for_planner()
 
     def _inspect(self, target: str = "all", **_: Any) -> Dict[str, Any]:
-        return self.session.inspect(str(target))
+        out = self.session.inspect(str(target))
+        if str(target) in ("all", "board") and "error" not in out and out.get("forks") is not None:
+            self.last_inspection = out
+        return out
 
     def _retreat(self, **_: Any) -> Dict[str, Any]:
         return self.session.retreat().for_planner()
 
     def _finish(self, success: bool = False, report: str = "", **_: Any) -> Dict[str, Any]:
+        if isinstance(success, str):
+            success = success.strip().lower() in ("true", "yes", "1")
+        if success:
+            problem = self._success_evidence_problem()
+            if problem:
+                self.refused_verdicts += 1
+                return {"error": problem, "refused": "finish"}
         self.finished = {"success": bool(success), "report": str(report)}
         self.session.finished = True
         return {"ok": True, "recorded": self.finished}
+
+    def _success_evidence_problem(self) -> str:
+        if not self.session.feasible:
+            return "the spec failed validation, so nothing was built: finish with success=false"
+        insp = self.last_inspection
+        if insp is None:
+            return ("a success verdict needs evidence: call inspect with target 'all' after the last "
+                    "skill, then finish")
+        bad = [f for f, v in (insp.get("forks") or {}).items() if not v.get("wire_in_slot")]
+        if not (insp.get("connector") or {}).get("in_holder"):
+            bad.append(self.session.connector_id)
+        if bad:
+            return (f"the last inspection shows {', '.join(bad)} not seated: fix that or finish with "
+                    "success=false")
+        return ""

@@ -24,6 +24,7 @@ setup(
         'console_scripts': [
             'run_build = harness_agent.run_build:main',
             'check_nebius = harness_agent.check_nebius:main',
+            'vision_eval = harness_agent.vision_eval:main',
         ],
     },
 )

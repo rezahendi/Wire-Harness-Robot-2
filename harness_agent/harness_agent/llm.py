@@ -17,6 +17,7 @@ import http.client
 import json
 import os
 import re
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -28,7 +29,8 @@ DEFAULT_BASE_URL = "https://api.tokenfactory.nebius.com/v1/"
 # substrings in order of preference (matched case-insensitively against model ids)
 PLANNER_PREFERENCE = ("nemotron-3-super", "nemotron-3-ultra", "nemotron-3_5", "nemotron-3-nano-30b",
                       "nemotron")
-VISION_PREFERENCE = ("nemotron-3-nano-omni", "nano-omni", "omni", "nemotron-nano-2-vl", "minicpm-v", "gemma-3", "-vl")
+VISION_PREFERENCE = ("nemotron-3-nano-omni", "nano-omni", "cosmos-reason", "nemotron-nano-2-vl", "omni",
+                     "minicpm-v", "gemma-3", "kimi-k3", "-vl")
 FAST_PREFERENCE = ("nemotron-3-nano-30b", "nemotron-3-nano", "lightning", "nemotron")
 
 
@@ -43,10 +45,15 @@ class Usage:
     completion_tokens: int = 0
     seconds: float = 0.0
     per_model: Dict[str, Dict[str, float]] = field(default_factory=dict)
+    _lock: Any = field(default_factory=threading.Lock, repr=False, compare=False)
 
     def add(self, model: str, usage: Optional[Dict[str, Any]], seconds: float) -> None:
-        p = int((usage or {}).get("prompt_tokens", 0))
-        c = int((usage or {}).get("completion_tokens", 0))
+        with self._lock:                  # vision_eval scores images from several threads
+            self._add(model, usage, seconds)
+
+    def _add(self, model: str, usage: Optional[Dict[str, Any]], seconds: float) -> None:
+        p = int((usage or {}).get("prompt_tokens", 0) or 0)
+        c = int((usage or {}).get("completion_tokens", 0) or 0)
         self.calls += 1
         self.prompt_tokens += p
         self.completion_tokens += c

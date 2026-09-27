@@ -153,7 +153,7 @@ so the expert, the controller and the observation/action definitions are identic
 | `harness_sim` | Python | `mujoco_sim_node`: physics + UR-driver-like ROS interface |
 | `harness_task` | Python | `routing_task_node` (RouteHarness action server, expert or learned policy), `route_harness` CLI |
 | `harness_learning` | Python | `HarnessRouting-v0` Gymnasium env, `record_demos`, `replay_demo`, `inspect_demos`, `run_expert` |
-| `harness_agent` | Python | build agent: harness specs and drawings, the robot's skills as tools, Nemotron planner on Nebius Token Factory, `run_build`, `check_nebius` |
+| `harness_agent` | Python | build agent: harness specs and drawings, the robot's skills as tools, Nemotron planner on Nebius Token Factory, camera check with a vision model, `run_build`, `check_nebius`, `vision_eval` |
 | `harness_bench` | Python | cross-simulator benchmarks: runs the same rigs and the same analysis on MuJoCo or Isaac Sim and writes a comparison report |
 | `harness_bringup` | Python | `cell.launch.py`, `demo.launch.py`, `config/cell.yaml` |
 
@@ -257,17 +257,49 @@ never shown to the model.
 ```bash
 # once: a Token Factory key (tokenfactory.nebius.com), then check the setup
 export NEBIUS_API_KEY=...
-ros2 run harness_agent check_nebius           # lists the models, tests a tool call and an image
+ros2 run harness_agent check_nebius               # lists the models, tests a tool call and an image
+ros2 run harness_agent check_nebius --vision-all  # which of your models accept images
 
 SPECS=$(ros2 pkg prefix harness_agent)/share/harness_agent/specs
-ros2 run harness_agent run_build --spec $SPECS/demo_3fork.yaml --planner nemotron --video
+ros2 run harness_agent run_build --spec $SPECS/demo_3fork.yaml --planner nemotron --vision --video
 ros2 run harness_agent run_build --spec $SPECS/demo_3fork.yaml --planner scripted   # no model
 ros2 run harness_agent run_build --spec $SPECS/demo_infeasible.yaml --planner nemotron
 ```
 
 Each run writes `drawing.png` (the formboard drawing generated from the spec), `report.md`
 (every step with its outcome), `trace.json` (tool calls, model messages, token usage, ground
-truth) and optionally `video.mp4` to `runs/<spec>_<planner>_<seed>/`.
+truth), with `--vision` the inspection photos in `inspection/`, and optionally `video.mp4` to
+`runs/<spec>_<planner>_<seed>/`.
+
+**No success without evidence.** `finish(success=true)` is refused unless an `inspect` of
+everything, made after the last physical skill, shows every fixture seated. The first live
+run showed why: Nemotron wrote "retreat, then inspect all, then finish" in its reasoning and
+then went straight to `finish`. The verdict happened to be right; now it has to be earned.
+
+**Camera check (`--vision`).** `inspect` also photographs each fixture from two angles with a
+virtual inspection camera and asks a vision-language model on Token Factory one narrow question
+("is the wire seated in fork F2?", answered as JSON with a confidence and a sentence of
+evidence). Perception stays the primary check; when the two disagree the agent looks again from
+new angles and flags the fixture for a manual check if they still disagree. None of the NVIDIA
+models on Token Factory take images today, so the vision model is one of the open VLMs there
+(`check_nebius --vision-all` found MiniCPM-V 4.5, Gemma 3 27B and Kimi K3); Nemotron stays the
+planner.
+
+How far to trust the camera check is measured, not assumed. `vision_eval` builds harnesses in
+simulation, photographs the fixtures along the way, including deliberately botched steps (wire
+released over the fork, wire resting on the lips instead of pressed in, connector dropped on its
+holder), labels every image with simulator ground truth, and scores any number of models on the
+same images, with perception as the baseline:
+
+```bash
+ros2 run harness_agent vision_eval make-set --out vision_set --seeds 0-11     # simulation only
+ros2 run harness_agent vision_eval score --set vision_set \
+    --model openbmb/MiniCPM-V-4_5 --model google/gemma-3-27b-it --model moonshotai/Kimi-K3
+```
+
+`score` writes `vision_set/report.md`: accuracy, defect recall (not-seated fixtures caught),
+false alarms (good fixtures rejected), results on the hard cases and per fault, latency, tokens
+per image, and a sheet of the images each model got wrong.
 
 The three planners go through the same tools, so their builds compare directly: `nemotron`
 (the model decides), `scripted` (the same rules hard-coded) and `expert` (the original
@@ -301,9 +333,9 @@ unbuildable job instead of damaging it. Current state of the example specs:
 | `demo_4fork` | **known hard case**: after F2 the free wire lies against F3 and the carry snags on it; the scripted planner and the original expert both fail today |
 | `demo_infeasible` | refused with five reasons (slack, off-board holder, reach, spacing, sharp turn) |
 
-The Token Factory client uses only the Python standard library and picks the planner and
-vision models from the models your key can see (`HARNESS_PLANNER_MODEL` /
-`HARNESS_VISION_MODEL` override the choice).
+The Token Factory client uses only the Python standard library, retries rate limits, server
+errors and timeouts, and picks the planner and vision models from the models your key can see
+(`HARNESS_PLANNER_MODEL` / `HARNESS_VISION_MODEL` override the choice).
 
 ---
 
@@ -329,9 +361,13 @@ sensor/perception noise, randomisation ranges). Pass your own file with
 
 ```bash
 cd ~/harness_ws
-colcon test --packages-select harness_core harness_learning && colcon test-result --verbose
+colcon test --packages-select harness_core harness_learning harness_agent && colcon test-result --verbose
 HARNESS_SLOW_TESTS=1 python3 -m pytest src/wire_harness_robot/harness_core/test   # + a full episode
 ```
+
+The agent tests need no key and no network: the Token Factory client runs against a local
+fake server (retries, timeouts, malformed answers), the planner loop against a scripted
+stand-in for the model, and the camera check against a stub vision model.
 
 The tests check, among others, that the DH kinematics, the URDF used by RViz and the MuJoCo
 model agree to 1e-6, that the F/T sensor is payload compensated, that force control settles
@@ -426,6 +462,10 @@ out of the colcon workspace.
   so contact forces during seating are on the high side. The benchmark suite is there to
   keep that honest, and the segment length is one line of config.
 * The arm links are visual only in the physics (the gripper and F/T sensor collide).
+* A connector can end up in the pocket but not clicked in: the holder latch needs it within
+  0.8 mm of the floor and 3 degrees level, the seat check accepts 2 mm. It holds in the
+  normal builds, but after a botched drop onto the holder rails one run was later pulled
+  out by the wire. Planned fix: a pull test after insertion, as on a real line.
 * Nothing here has been measured against a real harness bundle yet. The two measurements
   that would anchor everything else: bending stiffness of a real bundle (clamp a length
   horizontally, measure the droop, invert the elastica) and its friction on the board.

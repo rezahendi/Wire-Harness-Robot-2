@@ -13,11 +13,16 @@ the scripted planner, or a person at a terminal) makes the decisions:
 What the planner sees is *perception only* (noisy cable keypoints, connector pose, the
 wrist wrench): the same information a real cell has. Ground truth from the simulator is
 recorded next to it for scoring, and never shown to the planner.
+
+With a ``VisualInspector`` attached, ``inspect`` also photographs each fixture with the
+inspection camera and asks a vision-language model about it: a second, independent check
+whose verdicts are logged against ground truth as well.
 """
 
 from __future__ import annotations
 
 import math
+import os
 import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Dict, Generator, List, Optional
@@ -63,7 +68,8 @@ class CellSession:
     def __init__(self, spec: HarnessSpec, seed: int = 0, randomize: bool = False,
                  base_cfg: Optional[CellConfig] = None, max_sim_time: float = 900.0,
                  render: bool = False, camera: str = "overview", frame_every: float = 0.5,
-                 on_event: Optional[Callable[[Dict[str, Any]], None]] = None):
+                 on_event: Optional[Callable[[Dict[str, Any]], None]] = None,
+                 inspector: Optional[Any] = None, inspection_dir: Optional[str] = None):
         from harness_learning.env import HarnessRoutingEnv   # imported late: pulls in MuJoCo
 
         self.spec = spec
@@ -82,6 +88,12 @@ class CellSession:
         self.finished = False
         self.env = None
         self.expert = None
+        self.inspector = inspector           # VisualInspector (or None: perception only)
+        self.inspection_dir = inspection_dir
+        self.visual_checks: List[Dict[str, Any]] = []
+        self._camera = None
+        self._looks: Dict[str, int] = {}     # inspections per target (each one uses a new view)
+        self._last_status: Optional[Dict[str, Any]] = None
         if self.feasible:
             self.env = HarnessRoutingEnv(cfg=self.cfg, randomize=randomize,
                                          max_episode_time=max_sim_time + 60.0,
@@ -149,19 +161,37 @@ class CellSession:
         return {"value": value, "reason": reason, "max_force": max_f, "t0": t0,
                 "messages": [m for _, m in ex.log[log0:]]}
 
-    def _hold(self, seconds: float) -> None:
+    def _hold(self, seconds: float, collect: Optional[List[Dict[str, np.ndarray]]] = None) -> None:
         steps = max(1, int(round(seconds / self.cfg.sim.policy_dt)))
         for _ in range(steps):
             self.env.step(self.expert._hold())
             self.expert._last_obs = self.obs
             self._grab_frame()
+            if collect is not None:
+                collect.append(self.obs)
+
+    def settled_obs(self, seconds: float = 0.4) -> Dict[str, np.ndarray]:
+        """Hold still and average the noisy perception outputs over the samples.
+
+        One sample of the holder position is off by 1.5 mm (1 sigma) per axis, which is
+        enough to call a seated connector unseated; eight samples bring that to 0.5 mm.
+        """
+        samples: List[Dict[str, np.ndarray]] = []
+        self._hold(seconds, collect=samples)
+        out = dict(samples[-1])
+        for key in ("cable", "connector_pos", "holder_pos"):
+            out[key] = np.mean([np.asarray(o[key], dtype=float) for o in samples], axis=0)
+        yaws = np.array([float(o["holder_yaw"][0]) for o in samples])
+        out["holder_yaw"] = np.array([math.atan2(np.sin(yaws).mean(), np.cos(yaws).mean())])
+        return out
 
     def _result(self, skill: str, args: Dict[str, Any], ok: bool, outcome: str,
                 run: Dict[str, Any], wall: float) -> SkillResult:
+        perceived = self.perceive(self.settled_obs(0.3))
         res = SkillResult(skill=skill, args=args, ok=ok, outcome=outcome,
                           messages=run.get("messages", []), sim_time_start=run.get("t0", self.sim_time),
                           sim_time_end=self.sim_time, max_force=run.get("max_force", 0.0),
-                          perceived=self.perceive(), truth=self.truth(), wall_time=wall)
+                          perceived=perceived, truth=self.truth(), wall_time=wall)
         self._emit({"type": "skill", **res.as_dict()})
         return res
 
@@ -175,11 +205,15 @@ class CellSession:
         return res
 
     # ----------------------------------------------------------- perception
-    def perceive(self, samples: int = 1) -> Dict[str, Any]:
-        """The cell's state as perception sees it (this is all a planner gets)."""
+    def perceive(self, obs: Optional[Dict[str, np.ndarray]] = None) -> Dict[str, Any]:
+        """The cell's state as perception sees it (this is all a planner gets).
+
+        ``obs`` defaults to the latest single observation; pass ``settled_obs()`` for the
+        averaged one.
+        """
         if self.env is None:
             return {}
-        obs = self.obs
+        obs = self.obs if obs is None else obs
         cfg = self.cfg
         bz = float(obs["board_z"][0])
         cable = obs["cable"]
@@ -252,8 +286,7 @@ class CellSession:
         """Settle briefly and report perception averaged over a few samples."""
         if self.env is None:
             return {"feasible": False, "issues": [i.as_dict() for i in self.issues]}
-        self._hold(0.3)
-        state = self.perceive()
+        state = self.perceive(self.settled_obs(0.4))
         self._emit({"type": "status", "sim_time": self.sim_time, "perceived": state, "truth": self.truth()})
         return state
 
@@ -344,27 +377,87 @@ class CellSession:
         return self._result("retreat", args, run["reason"] == "done", "home", run, time.perf_counter() - t_wall)
 
     def inspect(self, target: str = "all") -> Dict[str, Any]:
-        """Look at the board and report what perception says about a target.
+        """Look at the board and report on a target: a fork id, the connector, or ``all``.
 
-        ``target`` is a fork id, the connector id, ``connector`` or ``all``. The visual
-        check with a vision-language model plugs in here; until then the verdict comes
-        from the cable keypoints and connector pose, averaged over a short settle.
+        Perception (cable keypoints, connector pose, averaged over a short settle) always
+        answers. With a visual inspector attached, the camera also photographs each target
+        and the vision model gives its own verdict; ``disagreements`` lists the targets
+        where the two differ. Asking again about a target takes new camera views.
         """
         if self.env is None:
             return {"feasible": False}
         state = self.status()
+        self._last_status = state
         out: Dict[str, Any] = {"target": target, "sim_time_s": state["sim_time_s"], "method": "perception"}
         if target in ("all", "board"):
             out["forks"] = state["forks"]
             out["connector"] = state["connector"]
+            targets = list(self.route) + [self.connector_id]
         elif target in (self.connector_id, "connector"):
             out["connector"] = state["connector"]
+            targets = [self.connector_id]
         elif target in state["forks"]:
             out["fork"] = {target: state["forks"][target]}
+            targets = [target]
         else:
             out["error"] = f"unknown target {target!r}; use a fork id, {self.connector_id!r}, or 'all'"
+            targets = []
+        if self.inspector is not None and targets:
+            out["method"] = "perception+vision"
+            out["vision"], disagree = {}, []
+            for t in targets:
+                verdict = self.look(t)
+                out["vision"][t] = verdict.for_planner()
+                perceived = (state["connector"]["in_holder"] if t == self.connector_id
+                             else state["forks"][t]["wire_in_slot"])
+                if verdict.seated is not None and verdict.seated != perceived:
+                    disagree.append(t)
+            out["disagreements"] = disagree
+        self._last_status = None
         self._emit({"type": "inspect", "sim_time": self.sim_time, "result": out, "truth": self.truth()})
         return out
+
+    # -------------------------------------------------------------- vision
+    def camera(self):
+        if self._camera is None:
+            from .vision import InspectionCamera
+            self._camera = InspectionCamera(self.env.cell.sim)
+        return self._camera
+
+    def photograph(self, target: str, view: Optional[int] = None):
+        """Composite image of a fork or the connector holder: (kind, image, view index)."""
+        from .vision import compose
+        if view is None:
+            view = self._looks.get(target, 0)
+            self._looks[target] = view + 1
+        obs = self.obs
+        if target == self.connector_id or target == "connector":
+            views = self.camera().holder_views(obs["holder_pos"], float(obs["holder_yaw"][0]), view)
+            return "connector", compose(views, f"Holder for connector {self.connector_id}"), view
+        i = self.route.index(target)
+        views = self.camera().fork_views(obs["forks"][i], self.cfg.fork, view)
+        return "fork", compose(views, f"Fork {target}"), view
+
+    def look(self, target: str):
+        """Photograph a target and ask the visual inspector; logs the verdict with ground truth."""
+        kind, image, view = self.photograph(target)
+        verdict = self.inspector.ask(kind, target, image, view=view)
+        if self.inspection_dir:
+            os.makedirs(self.inspection_dir, exist_ok=True)
+            name = f"{len(self.visual_checks) + 1:02d}_{target}_view{view}.jpg"
+            image.save(os.path.join(self.inspection_dir, name), quality=90)
+            verdict.image = name
+        truth = self.truth()
+        state = self._last_status or self.perceive()
+        record = {"sim_time": round(self.sim_time, 2), "target": target, "kind": kind,
+                  "verdict": verdict.as_dict(),
+                  "perceived": (state["connector"]["in_holder"] if kind == "connector"
+                                else state["forks"][target]["wire_in_slot"]),
+                  "truth": (truth["connector_seated"] if kind == "connector"
+                            else truth["forks_routed"][target])}
+        self.visual_checks.append(record)
+        self._emit({"type": "visual_check", **record})
+        return verdict
 
     def summary(self) -> Dict[str, Any]:
         return {"spec": self.spec.name, "route": self.route, "connector": self.connector_id,
@@ -374,6 +467,9 @@ class CellSession:
                 "truth": self.truth() if self.env is not None else {}}
 
     def close(self) -> None:
+        if self._camera is not None:
+            self._camera.close()
+            self._camera = None
         if self.env is not None:
             self.env.close()
 
