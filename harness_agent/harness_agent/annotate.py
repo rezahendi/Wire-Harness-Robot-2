@@ -122,8 +122,13 @@ def annotate(run_dir: str, out_name: str = "video_annotated.mp4", fps: int = 16,
     planner = trace.get("planner", "")
     model = trace.get("model") or ""
     heading = title or f"{session.get('spec', 'harness build')}"
-    sub = (f"planner: Nemotron ({model.split('/')[-1]}) on Nebius Token Factory" if planner == "nemotron"
-           else f"planner: {planner}")
+    if planner == "nemotron":
+        low = model.lower()
+        family = next((f"Nemotron 3 {w.title()}" for w in ("super", "ultra", "nano") if w in low),
+                      model.split("/")[-1])
+        sub = f"planner: {family}, on Nebius Token Factory"
+    else:
+        sub = f"planner: {planner}"
     scen = trace.get("scenario") or "nominal"
     t_total = max(times[-1] if times else 1.0, ends[-1] if ends else 1.0, 1.0)
     f_title, f_body, f_small = _font(30), _font(21), _font(17)
