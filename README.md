@@ -300,18 +300,36 @@ ros2 run harness_agent vision_eval score --set vision_set2 \
 (good fixtures rejected), results on the hard cases and per fault, latency, tokens per image, and a
 sheet of the images each model got wrong.
 
-The first round (style v1: two general views, "is the wire seated in this fork?") was sobering.
-On 130 images, MiniCPM-V 4.5 reached 76% accuracy but caught only 48% of the defects, Gemma 3 27B
-called nearly everything seated (6% of defects caught), and Kimi K3 answered only 28 images
-before running out of its reasoning budget, but got all 28 right. The small models repeated the
-definition of "seated" back as their evidence, and the views were ambiguous: a wire lying on the
-board behind a fork looks as if it runs through the slot. Style v2 is the fix: both views look
-straight *through* the slot from opposite sides (a seated wire shows as orange inside the gap;
-otherwise the gap is empty), the fixture to check is boxed in magenta, and the model answers one
-local question per view ("is there orange wire in the gap between the prongs?"). The code, not the
-model, combines them: seated only if both views say yes. `v2refs` adds two labelled example images
-to the prompt. `run_build --vision-style v2 --vision-refs vision_set2/refs` uses the same setup in
-a live build.
+The first round (style v1: two general views, "is the wire seated in this fork?") was sobering:
+the small models repeated the definition of "seated" back as their evidence, and the views were
+ambiguous (a wire lying on the board behind a fork looks as if it runs through the slot). Style v2
+is the fix: both views look straight *through* the slot from opposite sides (a seated wire shows
+as orange inside the gap; otherwise the gap is empty), the fixture to check is boxed in magenta,
+and the model answers one local question per view ("is there orange wire in the gap between the
+prongs?"). The code, not the model, combines them: seated only if both views say yes. `v2refs`
+adds two labelled example images from a build outside the set. On 134 labelled images (60 not
+seated, 15 of them hard cases such as a wire resting on the lips):
+
+| check | accuracy | defects caught | false alarms | hard defects caught | median latency |
+|---|---|---|---|---|---|
+| perception (cable keypoints) | 99% | 98% | 0% | 93% | - |
+| Gemma 3 27B, v1 | 60% | 12% | 0% | 13% | 3.0 s |
+| MiniCPM-V 4.5, v1 | 74% | 50% | 7% | 7% | 0.7 s |
+| MiniCPM-V 4.5, v2 | 79% | 63% | 8% | 40% | 0.8 s |
+| Gemma 3 27B, v2refs | 77% | 57% | 7% | 33% | 2.1 s |
+| Kimi K3, v2refs | 69% (98% of the 70% it answers) | 92% | 3% | 93% | 12.6 s |
+| **Kimi K3 v2refs, MiniCPM-V v2 when Kimi has no answer** | **96%** | **97%** | **5%** | **100%** | |
+
+Kimi K3 is a reasoning model: with the examples it is right on 92 of the 94 images it answers,
+but on 40 it spends its 4,000-token budget thinking. MiniCPM-V answers those in under a second.
+That pair is the default camera check (`default_inspector`, the examples ship in `refs/`).
+It also caught the one defect perception missed: a connector sitting tilted in its pocket, which
+the pose check accepts because it does not look at tilt.
+
+Looking at where Kimi ran out of budget explained why: they are all seated wires that run from
+the slot straight towards the camera, so they hide the gap they run through, and the question
+said a wire "in front of the fork" does not count. Style v3 looks into the slot 25 degrees off
+its axis and says that a wire through the gap is also seen in front of and behind the fork.
 
 **Harness specs** are YAML in board millimetres, as on a drawing:
 

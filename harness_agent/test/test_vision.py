@@ -11,8 +11,10 @@ from harness_agent.llm import LLMError
 from harness_agent.session import CellSession
 from harness_agent.spec import HarnessSpec
 from harness_agent.tools import ToolBox
-from harness_agent.vision import (FakeVisionClient, VisualInspector, camera_basis, compose,
-                                  fixture_corners, parse_verdict, parse_views, project, to_data_url)
+from harness_agent.vision import (QUESTIONS, STYLES, VIEWS, FakeVisionClient, VisualInspector,
+                                  camera_basis, compose, default_inspector, fixture_corners,
+                                  packaged_references_dir, parse_verdict, parse_views, project,
+                                  to_data_url)
 from harness_agent.vision_eval import (breakdown, load_results, metrics, model_slug, parse_seeds,
                                        write_report)
 
@@ -108,6 +110,41 @@ def test_inspector_reports_unusable_answers_and_failed_calls():
     v = VisualInspector(fs, references=refs).ask("fork", "F1", img)
     assert fs.calls[0]["images"] == 3 and v.seated is True and v.style == "v2refs"
     assert v.prompt_tokens == 100
+
+
+def test_every_style_has_views_and_questions_for_both_fixture_kinds():
+    for style in STYLES:
+        for kind in ("fork", "connector"):
+            assert len(VIEWS[(style, kind)]) == 3 and all(len(v) == 2 for v in VIEWS[(style, kind)])
+            assert "{target}" in QUESTIONS[(style, kind)]
+    assert "towards you" in QUESTIONS[("v3", "fork")]       # a wire through the slot runs at the camera
+
+
+def test_fallback_answers_when_the_first_model_cannot():
+    img = np.zeros((48, 64, 3), np.uint8)
+    thinker = FakeVisionClient(lambda p: "")                  # out of reasoning budget: no content
+    fast = FakeVisionClient(lambda p: '{"A": "no", "B": "no", "evidence": "gap empty"}')
+    insp = VisualInspector(thinker, "big/thinker", fallback=VisualInspector(fast, "small/fast"))
+    v = insp.ask("fork", "F1", img)
+    assert v.seated is False and v.model == "small/fast" and v.fallback_from == "big/thinker"
+    assert v.prompt_tokens == 200                             # both calls are counted
+    assert "falling back to small/fast" in insp.describe()
+    ok = VisualInspector(FakeVisionClient(), "big/thinker", fallback=VisualInspector(fast, "small/fast"))
+    assert ok.ask("fork", "F1", img).model == "big/thinker" and len(fast.calls) == 1
+
+
+def test_default_inspector_uses_the_measured_best_pair(monkeypatch):
+    monkeypatch.delenv("HARNESS_VISION_MODEL", raising=False)
+    monkeypatch.delenv("HARNESS_VISION_BASE_URL", raising=False)
+    assert packaged_references_dir() is not None
+    client = FakeVisionClient(models=["google/gemma-3-27b-it", "moonshotai/Kimi-K3", "openbmb/MiniCPM-V-4_5"])
+    insp = default_inspector(client)
+    assert insp.model == "moonshotai/Kimi-K3" and insp.style == "v2"
+    assert [len(insp.references[k]) for k in ("fork", "connector")] == [2, 2]
+    assert insp.fallback.model == "openbmb/MiniCPM-V-4_5" and not insp.fallback.references
+    assert default_inspector(client, fallback_model="none").fallback is None
+    without_kimi = default_inspector(FakeVisionClient(models=["openbmb/MiniCPM-V-4_5"]))
+    assert without_kimi.model == "fake-vlm" and without_kimi.fallback.model == "openbmb/MiniCPM-V-4_5"
 
 
 def test_finish_needs_a_fresh_inspection_showing_everything_seated():

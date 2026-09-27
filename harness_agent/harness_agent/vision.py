@@ -23,6 +23,7 @@ inspector takes any image, so the same questions work on photos of a real board.
 from __future__ import annotations
 
 import base64
+import inspect
 import io
 import json
 import math
@@ -38,7 +39,7 @@ from .llm import LLMError, TokenFactoryClient
 
 ImageLike = Union[np.ndarray, Any]          # an RGB array or a PIL image (PIL is imported lazily)
 Box = Optional[Tuple[float, float, float, float]]
-STYLES = ("v1", "v2")
+STYLES = ("v1", "v2", "v3")
 DEFAULT_STYLE = "v2"
 HIGHLIGHT = (255, 0, 255)                   # magenta: no fixture, wire or board has that colour
 
@@ -66,6 +67,18 @@ VIEWS: Dict[Tuple[str, str], Tuple[Tuple[Tuple[str, float, float, float], ...], 
         (("from above", 0.0, -88.0, 0.15), ("from the side, low", 90.0, -12.0, 0.15)),
         (("from above, closer", 0.0, -88.0, 0.12), ("end on, low", 0.0, -12.0, 0.15)),
         (("from above", 30.0, -80.0, 0.15), ("other side, low", -90.0, -12.0, 0.15)),
+    ),
+    # v3: into the slot at 25 deg off its axis, so a wire through the gap is seen crossing it
+    # instead of pointing straight at the camera (where it hides the gap it runs through)
+    ("v3", "fork"): (
+        (("into the slot", 25.0, -8.0, 0.13), ("into the slot, other side", 205.0, -8.0, 0.13)),
+        (("into the slot, higher", -25.0, -15.0, 0.12), ("other side, higher", 155.0, -15.0, 0.12)),
+        (("into the slot, close", 30.0, -5.0, 0.11), ("other side, close", 210.0, -5.0, 0.11)),
+    ),
+    ("v3", "connector"): (
+        (("from above", 0.0, -88.0, 0.15), ("from the side", 90.0, -20.0, 0.15)),
+        (("from above, closer", 0.0, -88.0, 0.12), ("end on", 0.0, -20.0, 0.15)),
+        (("from above", 30.0, -80.0, 0.15), ("other side", -90.0, -20.0, 0.15)),
     ),
 }
 
@@ -113,6 +126,23 @@ For each view, answer one question: is the black connector lying flat inside the
 Reply with JSON only:
 """ + _JSON_V2,
 }
+
+QUESTIONS[("v3", "fork")] = """You check fork {target} on a wire-harness formboard. The image has two views of it, A and B, from opposite sides. In each view the fork to check is inside the magenta box; ignore everything outside the box. {appearance}
+
+The fork holds the wire when the wire runs through the U-shaped gap between the fork's two prongs, below the yellow knobs. Both views look into that gap at a slight angle. A wire that runs through the gap is also seen in front of the fork and behind it, because it runs roughly towards you and away from you; that is expected.
+
+For each view, answer one question: does the orange wire go through the gap between the two blue prongs, below the yellow knobs? Answer no if the gap is empty (you see the background through it), or if the wire only lies on the board next to the fork, or lies across the top of the knobs.
+
+Reply with JSON only:
+""" + _JSON_V2
+QUESTIONS[("v3", "connector")] = """You check the holder of connector {target} on a wire-harness formboard. The image has two views of it: A from above and B from the side. In each view the holder to check is inside the magenta box; ignore everything outside the box. {appearance}
+
+The connector is seated when it lies flat and fully inside the holder's pocket, between the two end walls, down on the pocket floor. The side rails of the pocket are low, so from the side a seated connector sticks out well above them; that is expected.
+
+For each view, answer one question: is the black connector lying flat inside the green pocket, between the end walls? Answer no if it lies next to the holder, rests on top of a wall or rail, is tilted (one end higher than the other), or stands on end.
+
+Reply with JSON only:
+""" + _JSON_V2
 
 REFERENCE_INTRO = "Two labelled examples from the same camera come first, then the image to check."
 
@@ -312,10 +342,11 @@ class VisualVerdict:
     per_view: Optional[Dict[str, Optional[bool]]] = None
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    fallback_from: str = ""           # the model that gave no usable answer before this one
 
     def for_planner(self) -> Dict[str, Any]:
         out: Dict[str, Any] = {"seated": self.seated, "confidence": round(self.confidence, 2),
-                               "evidence": self.evidence}
+                               "evidence": self.evidence, "model": self.model.split("/")[-1]}
         if self.per_view:
             out["views"] = self.per_view
         if self.error:
@@ -399,13 +430,15 @@ class VisualInspector:
     ``references`` maps a fixture kind to labelled example images, [(image, caption), ...],
     sent ahead of the image to check (few-shot). ``max_tokens`` is generous because
     reasoning models think before they answer: capped at 700, Kimi K3 ran out on 100 of
-    130 images.
+    130 images. ``fallback`` answers when this model gives no usable verdict (see
+    ``default_inspector`` for the combination that measured best).
     """
 
     def __init__(self, client: Optional[Any] = None, model: Optional[str] = None,
                  style: str = DEFAULT_STYLE, references: Optional[Dict[str, List[Tuple[Any, str]]]] = None,
                  appearance: Optional[Dict[str, str]] = None, max_tokens: int = 4000,
-                 temperature: float = 0.0, extra: Optional[Dict[str, Any]] = None):
+                 temperature: float = 0.0, extra: Optional[Dict[str, Any]] = None,
+                 fallback: Optional["VisualInspector"] = None):
         if style not in STYLES:
             raise ValueError(f"unknown style {style!r}; use one of {STYLES}")
         base_url = os.environ.get("HARNESS_VISION_BASE_URL")
@@ -420,10 +453,17 @@ class VisualInspector:
         self.max_tokens = max_tokens
         self.temperature = temperature
         self.extra = extra or {}
+        self.fallback = fallback
 
     @property
     def label(self) -> str:
         return self.style + ("refs" if self.references else "")
+
+    def describe(self) -> str:
+        text = f"{self.model} ({self.label})"
+        if self.fallback is not None:
+            text += f", falling back to {self.fallback.describe()}"
+        return text
 
     def prompt(self, kind: str, target: str) -> str:
         text = QUESTIONS[(self.style, kind)].format(target=target, appearance=self.appearance.get(kind, ""))
@@ -442,6 +482,17 @@ class VisualInspector:
         return parts
 
     def ask(self, kind: str, target: str, image: ImageLike, view: int = 0) -> VisualVerdict:
+        verdict = self._ask(kind, target, image, view)
+        if verdict.seated is None and self.fallback is not None:
+            fb = self.fallback.ask(kind, target, image, view)
+            fb.fallback_from = self.model
+            fb.seconds += verdict.seconds
+            fb.prompt_tokens += verdict.prompt_tokens
+            fb.completion_tokens += verdict.completion_tokens
+            return fb
+        return verdict
+
+    def _ask(self, kind: str, target: str, image: ImageLike, view: int = 0) -> VisualVerdict:
         if (self.style, kind) not in QUESTIONS:
             raise ValueError(f"unknown inspection kind {kind!r}")
         t0 = time.perf_counter()
@@ -469,6 +520,58 @@ class VisualInspector:
                              completion_tokens=int(usage.get("completion_tokens") or 0))
 
 
+def packaged_references_dir() -> Optional[str]:
+    """The labelled example images that ship with the package (refs/), if found."""
+    here = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "refs")
+    if os.path.exists(os.path.join(here, "refs.json")):
+        return here
+    try:
+        from ament_index_python.packages import get_package_share_directory
+        share = os.path.join(get_package_share_directory("harness_agent"), "refs")
+        return share if os.path.exists(os.path.join(share, "refs.json")) else None
+    except Exception:
+        return None
+
+
+# The combination that measured best on 134 labelled renders (vision_eval, style v2):
+# Kimi K3 with the labelled examples answers 70% of the images and is right on 98% of those;
+# when it runs out of reasoning budget, MiniCPM-V 4.5 (v2, no examples: they made it worse)
+# answers in under a second. Together: 96% accuracy, 97% of defects caught, 5% false alarms.
+PRIMARY_PREFERENCE = ("kimi-k3",)
+FALLBACK_PREFERENCE = ("minicpm-v", "gemma-3")
+
+
+def default_inspector(client: Optional[Any] = None, model: Optional[str] = None,
+                      fallback_model: Optional[str] = None, style: str = DEFAULT_STYLE,
+                      refs: Optional[str] = "packaged") -> "VisualInspector":
+    """The measured-best camera check with what this key can use.
+
+    ``model`` / ``fallback_model`` override the choice ("none" disables the fallback);
+    ``refs`` is a refs/ folder, "packaged" (default) or None."""
+    client = client or TokenFactoryClient()
+    try:
+        models = list(client.list_models())
+    except Exception:
+        models = []
+
+    def first(prefs: Sequence[str], exclude: Sequence[str] = ()) -> Optional[str]:
+        for pat in prefs:
+            hits = sorted((m for m in models if pat in m.lower() and m not in exclude), key=len)
+            if hits:
+                return hits[0]
+        return None
+
+    primary = model or os.environ.get("HARNESS_VISION_MODEL") or first(PRIMARY_PREFERENCE) or client.vision_model()
+    if fallback_model == "none":
+        fb_model = None
+    else:
+        fb_model = fallback_model or first(FALLBACK_PREFERENCE, exclude=[primary])
+    ref_dir = packaged_references_dir() if refs == "packaged" else refs
+    references = load_references(ref_dir, style) if ref_dir and style != "v1" else None
+    fallback = VisualInspector(client, fb_model, style=style) if fb_model else None
+    return VisualInspector(client, primary, style=style, references=references, fallback=fallback)
+
+
 def load_references(ref_dir: str, style: str = DEFAULT_STYLE) -> Dict[str, List[Tuple[Any, str]]]:
     """Labelled example images written by ``vision_eval make-set`` (refs/refs.json)."""
     from PIL import Image
@@ -487,19 +590,25 @@ class FakeVisionClient:
     ``answer`` returns the reply text; the default says every fixture is seated.
     """
 
-    def __init__(self, answer: Optional[Callable[[str], str]] = None):
+    def __init__(self, answer: Optional[Callable[[str], str]] = None, models: Sequence[str] = ()):
         self.answer = answer or (lambda prompt: '{"seated": true, "confidence": 0.9, "evidence": "stub", '
                                                 '"A": "yes", "B": "yes"}')
+        self.models = list(models)
         self.calls: List[Dict[str, Any]] = []
         self.usage = type("U", (), {"as_dict": staticmethod(lambda: {"calls": 0})})()
 
     def vision_model(self) -> str:
         return "fake-vlm"
 
+    def list_models(self) -> List[str]:
+        return self.models
+
     def chat(self, model: str, messages: List[Dict[str, Any]], **_: Any) -> Dict[str, Any]:
         content = messages[-1]["content"]
         prompt = content[0]["text"]
         self.calls.append({"model": model, "prompt": prompt,
                            "images": sum(p.get("type") == "image_url" for p in content)})
-        return {"role": "assistant", "content": self.answer(prompt), "tool_calls": [], "reasoning": "",
+        takes_model = len(inspect.signature(self.answer).parameters) >= 2
+        text = self.answer(prompt, model) if takes_model else self.answer(prompt)
+        return {"role": "assistant", "content": text, "tool_calls": [], "reasoning": "",
                 "usage": {"prompt_tokens": 100, "completion_tokens": 10}}

@@ -33,7 +33,8 @@ from typing import Any, Dict, Generator, Iterable, List, Optional, Sequence, Tup
 import numpy as np
 
 FAULTS = ("released_early", "not_pressed", "connector_dropped")
-SCORE_STYLES = ("v1", "v2", "v2refs")
+RENDER_STYLES = ("v1", "v2", "v3")
+SCORE_STYLES = ("v1", "v2", "v2refs", "v3", "v3refs")
 REF_CAPTIONS = {
     ("fork", True): "fork seated: the orange wire runs through the gap between the two prongs, "
                     "below the yellow knobs. Answer A yes, B yes.",
@@ -42,6 +43,11 @@ REF_CAPTIONS = {
     ("connector", True): "connector seated: it lies flat, fully inside the green pocket. Answer A yes, B yes.",
     ("connector", False): "connector NOT seated: it is not down in the pocket. Answer A no, B no.",
 }
+
+
+def image_key(style: str) -> str:
+    """labels.jsonl field holding the image of a render style (v1 kept the original name)."""
+    return "image" if style == "v1" else f"image_{style}"
 
 
 # ------------------------------------------------------------------ helpers
@@ -195,8 +201,8 @@ def make_set(out: str, spec_path: str, seeds: Sequence[int], randomize: bool = T
     from harness_core.render_util import choose_gl_backend
     choose_gl_backend()
 
-    for sub in ("images", "images_v2"):
-        os.makedirs(os.path.join(out, sub), exist_ok=True)
+    for style in RENDER_STYLES:
+        os.makedirs(os.path.join(out, "images" if style == "v1" else f"images_{style}"), exist_ok=True)
     labels: List[Dict[str, Any]] = []
     for seed in seeds:
         t0 = time.perf_counter()
@@ -208,11 +214,12 @@ def make_set(out: str, spec_path: str, seeds: Sequence[int], randomize: bool = T
             view = int(rng.integers(0, 3))
             ident = f"s{seed:03d}_{len(labels) - n_before:02d}_{target}"
             paths = {}
-            for style, sub in (("v1", "images"), ("v2", "images_v2")):
+            for style in RENDER_STYLES:
                 _, image, _ = session.photograph(target, view=view, style=style)
-                paths[style] = os.path.join(sub, ident + ".jpg")
-                image.save(os.path.join(out, paths[style]), quality=90)
-            labels.append({"id": ident, "image": paths["v1"], "image_v2": paths["v2"], "kind": kind,
+                paths[image_key(style)] = os.path.join("images" if style == "v1" else f"images_{style}",
+                                                       ident + ".jpg")
+                image.save(os.path.join(out, paths[image_key(style)]), quality=90)
+            labels.append({"id": ident, **paths, "kind": kind,
                            "target": target, "seed": seed, "spec": os.path.basename(spec_path),
                            "stage": stage, "fault": fault, "view": view, "truth": truth,
                            "perceived": perceived, "difficulty": _difficulty(kind, truth, detail),
@@ -245,14 +252,14 @@ def make_refs(ref_dir: str, spec_path: str, seed: int, randomize: bool = True, l
         if kind == "fork" and not truth and stage != "next":
             return                            # botched/failed states can look ambiguous
         rank = 0 if _difficulty(kind, truth, detail) in ("hard", "seated") else 1
-        imgs = {style: session.photograph(target, view=0, style=style)[1] for style in ("v1", "v2")}
+        imgs = {style: session.photograph(target, view=0, style=style)[1] for style in RENDER_STYLES}
         cands.setdefault((kind, truth), []).append((rank, imgs, stage))
 
     _build_and_snap(spec_path, seed, randomize, True, snap)
-    spec: Dict[str, List[Dict[str, str]]] = {"v1": [], "v2": []}
+    spec: Dict[str, List[Dict[str, str]]] = {style: [] for style in RENDER_STYLES}
     for (kind, truth), items in sorted(cands.items(), key=lambda kv: (kv[0][0], not kv[0][1])):
         rank, imgs, stage = sorted(items, key=lambda it: it[0])[0]
-        for style in ("v1", "v2"):
+        for style in RENDER_STYLES:
             name = f"{kind}_{'yes' if truth else 'no'}_{style}.jpg"
             imgs[style].save(os.path.join(ref_dir, name), quality=90)
             spec[style].append({"kind": kind, "seated": truth, "image": name,
@@ -326,12 +333,15 @@ def score_model(set_dir: str, model: str, client=None, style: str = "v2", worker
     from .vision import VisualInspector, load_references
 
     labels = read_set(set_dir)[:limit] if limit else read_set(set_dir)
-    base_style = "v1" if style == "v1" else "v2"
+    base_style = style[:-4] if style.endswith("refs") else style
     refs = load_references(os.path.join(set_dir, "refs"), base_style) if style.endswith("refs") else None
     inspector = VisualInspector(client=client, model=model, style=base_style, references=refs)
+    missing = [lab["id"] for lab in labels if image_key(base_style) not in lab]
+    if missing:
+        raise SystemExit(f"{set_dir} has no {base_style} images (e.g. {missing[0]}); re-run make-set")
 
     def one(lab: Dict[str, Any]) -> Dict[str, Any]:
-        path = lab["image"] if base_style == "v1" else lab.get("image_v2", lab["image"])
+        path = lab[image_key(base_style)]
         with Image.open(os.path.join(set_dir, path)) as im:
             v = inspector.ask(lab["kind"], lab["target"], im.convert("RGB"), view=lab["view"])
         return {**lab, "model": model, "style": style, "scored_image": path, "pred": v.seated,
@@ -403,6 +413,28 @@ def error_sheet(set_dir: str, rows: Sequence[Dict[str, Any]], path: str, max_ite
     return path
 
 
+def combinations(keyed: Dict[Tuple[str, str], List[Dict[str, Any]]]):
+    """First-with-a-verdict pairs: [((first key, then key), breakdown, share answered by first)],
+    best accuracy first. Only pairs whose first sometimes fails to answer and whose second
+    always answers are worth listing."""
+    out = []
+    for p_key, p_rows in keyed.items():
+        p_by = {r["id"]: r for r in p_rows}
+        if not any(r.get("pred") is None for r in p_rows):
+            continue
+        for f_key, f_rows in keyed.items():
+            if f_key == p_key or any(r.get("pred") is None for r in f_rows):
+                continue
+            f_by = {r["id"]: r for r in f_rows}
+            ids = [i for i in p_by if i in f_by]
+            rows = [{**f_by[i], "pred": p_by[i]["pred"] if p_by[i]["pred"] is not None else f_by[i]["pred"]}
+                    for i in ids]
+            share = sum(p_by[i]["pred"] is not None for i in ids) / max(1, len(ids))
+            out.append(((p_key, f_key), breakdown(rows), share))
+    out.sort(key=lambda c: -c[1]["all"]["accuracy"])
+    return out
+
+
 def _pct(v: Optional[float]) -> str:
     return "n/a" if v is None else f"{100 * v:.0f}%"
 
@@ -418,8 +450,10 @@ def write_report(set_dir: str, results: Dict[Any, List[Dict[str, Any]]], usage: 
              "Labels are simulator ground truth. A *defect* is a fixture that is not seated; "
              "*defect recall* is the share of defects the check catches, *false alarms* the "
              "share of good fixtures it rejects. An unusable answer counts as wrong. "
-             "Styles: v1 general views and one yes/no question; v2 views through the slot, the "
-             "fixture boxed, one question per view; v2refs the same with two labelled examples.", "",
+             "Styles: v1 general views and one yes/no question; v2 views straight through the slot, "
+             "the fixture boxed, one question per view; v3 the same 25 degrees off the slot axis, with "
+             "the question spelled out for a wire that runs towards the camera; *refs: with two "
+             "labelled examples.", "",
              "| check | style | accuracy | defect recall | false alarms | hard defects caught | unusable | "
              "median latency | tokens in/out |", "|---|---|---|---|---|---|---|---|---|"]
     base = breakdown(labels, "perceived")
@@ -436,6 +470,20 @@ def write_report(set_dir: str, results: Dict[Any, List[Dict[str, Any]]], usage: 
                      f"{_pct(a['false_alarm_rate'])} | {_pct(b.get('difficulty=hard', {}).get('defect_recall'))} | "
                      f"{_pct(a['unusable'])} | {a.get('median_s', 0):.1f} s | {tok} |")
     lines.append("")
+    combos = combinations(keyed)
+    if combos:
+        lines += ["## Combinations", "",
+                  "A model that sometimes gives no usable answer (a reasoning model out of budget), backed "
+                  "by one that always answers: the first model's verdict when it has one, else the "
+                  "second's. Computed from the results above, no extra model calls.", "",
+                  "| first | then | accuracy | defect recall | false alarms | hard defects caught | "
+                  "answered by the first |", "|---|---|---|---|---|---|---|"]
+        for (p_key, f_key), b, share in combos[:5]:
+            a = b["all"]
+            lines.append(f"| `{p_key[0]}` {p_key[1]} | `{f_key[0]}` {f_key[1]} | {_pct(a['accuracy'])} | "
+                         f"{_pct(a['defect_recall'])} | {_pct(a['false_alarm_rate'])} | "
+                         f"{_pct(b.get('difficulty=hard', {}).get('defect_recall'))} | {_pct(share)} |")
+        lines.append("")
     for (model, style), rows in keyed.items():
         b = breakdown(rows)
         lines += [f"## `{model}`, {style}", "", "| subset | n | accuracy | defect recall | false alarms |",

@@ -406,8 +406,7 @@ class CellSession:
         if self.inspector is not None and targets:
             out["method"] = "perception+vision"
             out["vision"], disagree = {}, []
-            for t in targets:
-                verdict = self.look(t)
+            for t, verdict in zip(targets, self.look_all(targets)):
                 out["vision"][t] = verdict.for_planner()
                 perceived = (state["connector"]["in_holder"] if t == self.connector_id
                              else state["forks"][t]["wire_in_slot"])
@@ -445,24 +444,32 @@ class CellSession:
 
     def look(self, target: str):
         """Photograph a target and ask the visual inspector; logs the verdict with ground truth."""
-        kind, image, view = self.photograph(target)
-        verdict = self.inspector.ask(kind, target, image, view=view)
-        if self.inspection_dir:
-            os.makedirs(self.inspection_dir, exist_ok=True)
-            name = f"{len(self.visual_checks) + 1:02d}_{target}_view{view}.jpg"
-            image.save(os.path.join(self.inspection_dir, name), quality=90)
-            verdict.image = name
+        return self.look_all([target])[0]
+
+    def look_all(self, targets: List[str]):
+        """Photograph the targets (renderer: this thread), ask about them in parallel (the
+        model calls wait on the network), and log every verdict with ground truth."""
+        from concurrent.futures import ThreadPoolExecutor
+        shots = [(t, *self.photograph(t)) for t in targets]
+        with ThreadPoolExecutor(max_workers=max(1, min(4, len(shots)))) as pool:
+            verdicts = list(pool.map(lambda sh: self.inspector.ask(sh[1], sh[0], sh[2], view=sh[3]), shots))
         truth = self.truth()
         state = self._last_status or self.perceive()
-        record = {"sim_time": round(self.sim_time, 2), "target": target, "kind": kind,
-                  "verdict": verdict.as_dict(),
-                  "perceived": (state["connector"]["in_holder"] if kind == "connector"
-                                else state["forks"][target]["wire_in_slot"]),
-                  "truth": (truth["connector_seated"] if kind == "connector"
-                            else truth["forks_routed"][target])}
-        self.visual_checks.append(record)
-        self._emit({"type": "visual_check", **record})
-        return verdict
+        for (target, kind, image, view), verdict in zip(shots, verdicts):
+            if self.inspection_dir:
+                os.makedirs(self.inspection_dir, exist_ok=True)
+                name = f"{len(self.visual_checks) + 1:02d}_{target}_view{view}.jpg"
+                image.save(os.path.join(self.inspection_dir, name), quality=90)
+                verdict.image = name
+            record = {"sim_time": round(self.sim_time, 2), "target": target, "kind": kind,
+                      "verdict": verdict.as_dict(),
+                      "perceived": (state["connector"]["in_holder"] if kind == "connector"
+                                    else state["forks"][target]["wire_in_slot"]),
+                      "truth": (truth["connector_seated"] if kind == "connector"
+                                else truth["forks_routed"][target])}
+            self.visual_checks.append(record)
+            self._emit({"type": "visual_check", **record})
+        return verdicts
 
     def summary(self) -> Dict[str, Any]:
         return {"spec": self.spec.name, "route": self.route, "connector": self.connector_id,

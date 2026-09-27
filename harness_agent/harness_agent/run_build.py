@@ -78,8 +78,12 @@ def write_report(path: str, spec, result: Dict[str, Any], session) -> None:
     checks = getattr(session, "visual_checks", None) or []
     if checks:
         agree = sum(c["verdict"]["seated"] == c["truth"] for c in checks)
+        by_model: Dict[str, int] = {}
+        for c in checks:
+            by_model[c["verdict"]["model"]] = by_model.get(c["verdict"]["model"], 0) + 1
+        answered = ", ".join(f"`{m}` {n}" for m, n in by_model.items())
         lines += ["## Visual inspection", "",
-                  f"{len(checks)} camera checks by `{checks[0]['verdict']['model']}`; the vision verdict "
+                  f"{len(checks)} camera checks (answered by {answered}); the vision verdict "
                   f"matched ground truth in {agree}, perception in "
                   f"{sum(c['perceived'] == c['truth'] for c in checks)}.", "",
                   "| # | target | vision (confidence) | perception | truth | evidence |", "|---|---|---|---|---|---|"]
@@ -90,7 +94,8 @@ def write_report(path: str, spec, result: Dict[str, Any], session) -> None:
         for k, c in enumerate(checks, 1):
             v = c["verdict"]
             img = f"[{c['target']}](inspection/{v['image']})" if v.get("image") else c["target"]
-            lines.append(f"| {k} | {img} | {word(v['seated'])} ({v['confidence']:.2f}) | {word(c['perceived'])} | "
+            lines.append(f"| {k} | {img} | {word(v['seated'])} ({v['confidence']:.2f}, "
+                         f"{v['model'].split('/')[-1]}) | {word(c['perceived'])} | "
                          f"{word(c['truth'])} | {(v.get('evidence') or v.get('error') or '').replace('|', '/')} |")
         lines.append("")
         last = {}
@@ -121,10 +126,13 @@ def main(argv: Optional[list] = None) -> int:
     ap.add_argument("--video", action="store_true", help="also write video.mp4 (slower)")
     ap.add_argument("--vision", action="store_true",
                     help="camera check: a Token Factory vision model inspects each fixture too")
-    ap.add_argument("--vision-model", default=None, help="vision model id (default: picked automatically)")
-    ap.add_argument("--vision-style", default="v2", choices=("v1", "v2"), help="camera views and question style")
-    ap.add_argument("--vision-refs", default=None,
-                    help="folder with labelled example images (refs/ of a vision_eval set) for few-shot prompts")
+    ap.add_argument("--vision-model", default=None,
+                    help="vision model id (default: the measured-best one your key can use, Kimi K3)")
+    ap.add_argument("--vision-fallback", default=None,
+                    help="model that answers when the first gives no verdict (default: MiniCPM-V; 'none')")
+    ap.add_argument("--vision-style", default="v2", choices=("v1", "v2", "v3"), help="camera views and question style")
+    ap.add_argument("--vision-refs", default="packaged",
+                    help="labelled example images: 'packaged' (default), a refs/ folder, or 'none'")
     ap.add_argument("--out", default=None, help="output directory (default: runs/<spec>_<planner>_<seed>)")
     args = ap.parse_args(argv)
     if args.video or args.vision:
@@ -146,10 +154,10 @@ def main(argv: Optional[list] = None) -> int:
         from .llm import TokenFactoryClient
         client = TokenFactoryClient()
     if args.vision:
-        from .vision import VisualInspector, load_references
-        refs = load_references(args.vision_refs, args.vision_style) if args.vision_refs else None
-        inspector = VisualInspector(client=client, model=args.vision_model, style=args.vision_style,
-                                    references=refs)
+        from .vision import default_inspector
+        inspector = default_inspector(client, model=args.vision_model, fallback_model=args.vision_fallback,
+                                      style=args.vision_style,
+                                      refs=None if args.vision_refs == "none" else args.vision_refs)
     session = CellSession(spec, seed=args.seed, randomize=args.randomize, render=args.video,
                           frame_every=0.25, inspector=inspector,
                           inspection_dir=os.path.join(out, "inspection") if inspector else None)
@@ -158,7 +166,7 @@ def main(argv: Optional[list] = None) -> int:
     for i in session.issues:
         print(f"  {i.severity}: {i.message}")
     if inspector is not None:
-        print(f"  camera check: {inspector.model} (style {inspector.label})")
+        print(f"  camera check: {inspector.describe()}")
 
     if args.planner == "expert":
         if not session.feasible:

@@ -12,6 +12,7 @@ setup(
         ('share/ament_index/resource_index/packages', ['resource/harness_agent']),
         ('share/harness_agent', ['package.xml']),
         ('share/harness_agent/specs', glob('specs/*.yaml')),
+        ('share/harness_agent/refs', glob('refs/*')),
     ],
     install_requires=['setuptools'],
     extras_require={'test': ['pytest']},
