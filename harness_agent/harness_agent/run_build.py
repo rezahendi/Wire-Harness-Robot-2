@@ -123,6 +123,8 @@ def main(argv: Optional[list] = None) -> int:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--randomize", action="store_true", help="perturb the layout and wire around the spec")
     ap.add_argument("--max-turns", type=int, default=40)
+    ap.add_argument("--scenario", default="nominal",
+                    help="inject disturbances: nominal, popped_wire, slip_on_insert, both (see disturbances.py)")
     ap.add_argument("--video", action="store_true", help="also write video.mp4 (slower)")
     ap.add_argument("--vision", action="store_true",
                     help="camera check: a Token Factory vision model inspects each fixture too")
@@ -169,6 +171,10 @@ def main(argv: Optional[list] = None) -> int:
     if inspector is not None:
         print(f"  camera check: {inspector.describe()}")
 
+    from .disturbances import make_scenario
+    scenario = make_scenario(args.scenario, session.route) if session.feasible else None
+    if scenario is not None and scenario.name != "nominal":
+        print(f"  scenario: {scenario.name} ({scenario.description})")
     if args.planner == "expert":
         if not session.feasible:
             print("spec failed validation; the expert cannot run")
@@ -178,11 +184,11 @@ def main(argv: Optional[list] = None) -> int:
             session.retreat()
             result["final_inspection"] = session.inspect("all")
     elif args.planner == "scripted":
-        result = ScriptedPlanner(session).run(args.max_turns).as_dict()
+        result = ScriptedPlanner(session).run(args.max_turns, scenario=scenario).as_dict()
     else:
         planner = NemotronPlanner(session, client=client, model=args.model)
         print(f"  model: {planner.model}")
-        result = planner.run(args.max_turns).as_dict()
+        result = planner.run(args.max_turns, scenario=scenario).as_dict()
 
     result["events"] = session.events
     result["session"] = session.summary()

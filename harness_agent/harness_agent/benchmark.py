@@ -112,6 +112,9 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     ap.add_argument("--model", default=None, help="planner model id (default: picked automatically)")
     ap.add_argument("--out", default="runs/bench")
     ap.add_argument("--force", action="store_true", help="re-run builds already in --out")
+    ap.add_argument("--include", action="append", default=[],
+                    help="another benchmark folder whose results join the table (read only); repeatable")
+    ap.add_argument("--table-only", action="store_true", help="run nothing, just rewrite the table")
     args = ap.parse_args(list(argv) if argv is not None else None)
 
     from harness_core.render_util import choose_gl_backend
@@ -136,7 +139,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         with open(summary_path, encoding="utf-8") as f:
             rows = [json.loads(line) for line in f if line.strip()]
     done = {(r["planner"], r["scenario"], r["seed"]) for r in rows}
-    for seed in parse_seeds(args.seeds):
+    for seed in ([] if args.table_only else parse_seeds(args.seeds)):
         for scenario in scenarios:
             for planner in planners:
                 label = planner + ("+vision" if args.vision else "")
@@ -149,7 +152,14 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                 with open(summary_path, "w", encoding="utf-8") as f:
                     for r in rows:
                         f.write(json.dumps(r) + "\n")
-    table = summarize(rows)
+    shown = list(rows)
+    for extra in args.include:
+        path = os.path.join(extra, "summary.jsonl")
+        with open(path, encoding="utf-8") as f:
+            more = [json.loads(line) for line in f if line.strip()]
+        keys = {(r["planner"], r["scenario"], r["seed"]) for r in shown}
+        shown += [r for r in more if (r["planner"], r["scenario"], r["seed"]) not in keys]
+    table = summarize(shown)
     with open(os.path.join(args.out, "summary.md"), "w", encoding="utf-8") as f:
         f.write("# Recovery benchmark\n\n" + table + "\n")
     print("\n" + table)
