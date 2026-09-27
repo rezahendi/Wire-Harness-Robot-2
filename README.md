@@ -153,7 +153,7 @@ so the expert, the controller and the observation/action definitions are identic
 | `harness_sim` | Python | `mujoco_sim_node`: physics + UR-driver-like ROS interface |
 | `harness_task` | Python | `routing_task_node` (RouteHarness action server, expert or learned policy), `route_harness` CLI |
 | `harness_learning` | Python | `HarnessRouting-v0` Gymnasium env, `record_demos`, `replay_demo`, `inspect_demos`, `run_expert` |
-| `harness_agent` | Python | build agent: harness specs and drawings, the robot's skills as tools, Nemotron planner on Nebius Token Factory, camera check with a vision model, `run_build`, `check_nebius`, `vision_eval` |
+| `harness_agent` | Python | build agent: harness specs and drawings, the robot's skills as tools, Nemotron planner on Nebius Token Factory, camera check with a vision model, recovery benchmark, `run_build`, `check_nebius`, `vision_eval`, `benchmark` |
 | `harness_bench` | Python | cross-simulator benchmarks: runs the same rigs and the same analysis on MuJoCo or Isaac Sim and writes a comparison report |
 | `harness_bringup` | Python | `cell.launch.py`, `demo.launch.py`, `config/cell.yaml` |
 
@@ -326,10 +326,33 @@ That pair is the default camera check (`default_inspector`, the examples ship in
 It also caught the one defect perception missed: a connector sitting tilted in its pocket, which
 the pose check accepts because it does not look at tilt.
 
+The tilted connector also led to a fix: the pose check and the insert skill's own seat check
+now look at tilt (a connector with one end up on a rail has its centre in tolerance).
+
 Looking at where Kimi ran out of budget explained why: they are all seated wires that run from
 the slot straight towards the camera, so they hide the gap they run through, and the question
 said a wire "in front of the fork" does not count. Style v3 looks into the slot 25 degrees off
 its axis and says that a wire through the gap is also seen in front of and behind the fork.
+
+**Recovery benchmark.** Things go wrong on a real line between two robot moves, and a
+supervisor earns its keep by noticing. `benchmark` runs planners through the same builds with
+the same disturbances injected at the same points (`disturbances.py`):
+
+* `popped_wire`: right after F2 is routed, a snag opens its jaws and pulls the wire out
+  sideways (servoed forces, so only the wire at F2 moves). The planner only finds out from the
+  next state it is shown, or when the next `route_fork` is refused.
+* `slip_on_insert`: the first insertion loses the connector above its holder; it usually lands
+  on a rail or wall, where the fingers cannot get around it.
+* `both`, and `nominal` for reference.
+
+```bash
+ros2 run harness_agent benchmark --planners scripted --seeds 0-4 --out runs/bench
+ros2 run harness_agent benchmark --planners nemotron --seeds 0-4 --out runs/bench   # same table
+```
+
+The table counts builds that succeeded (ground truth), honest verdicts (the final claim matched
+the truth), steps, robot time and model tokens per build. Runs already in `--out` are skipped, so
+planners can be added at different times and on different machines.
 
 **Harness specs** are YAML in board millimetres, as on a drawing:
 
@@ -492,6 +515,10 @@ out of the colcon workspace.
   0.8 mm of the floor and 3 degrees level, the seat check accepts 2 mm. It holds in the
   normal builds, but after a botched drop onto the holder rails one run was later pulled
   out by the wire. Planned fix: a pull test after insertion, as on a real line.
+* After a slip, the connector can sit on the holder where the fingers cannot reach around it;
+  `insert_connector` then fails with `grasp_blocked_by_fixture`, and the way out is
+  `relocate_connector` first. The scripted planner does not know that rule (it is not in the
+  prompt either); whether a planner works it out is part of what the benchmark measures.
 * Nothing here has been measured against a real harness bundle yet. The two measurements
   that would anchor everything else: bending stiffness of a real bundle (clamp a length
   horizontally, measure the droop, invert the elastica) and its friction on the board.

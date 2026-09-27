@@ -28,9 +28,11 @@ import statistics
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Dict, Generator, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
+
+from .session import run_until_phase
 
 FAULTS = ("released_early", "not_pressed", "connector_dropped")
 RENDER_STYLES = ("v1", "v2", "v3")
@@ -68,19 +70,6 @@ def model_slug(model: str) -> str:
     return model.replace("/", "__").replace(":", "_")
 
 
-def _until_phase(gen: Generator, expert, phase: str) -> Generator:
-    """Run a skill generator until the expert enters ``phase``, then abandon it."""
-    try:
-        action = next(gen)
-        while expert.phase != phase:
-            obs = yield action
-            action = gen.send(obs)
-    except StopIteration:
-        return False
-    gen.close()
-    return True
-
-
 def botch_fork(session, fork_id: str, mode: str) -> None:
     """Reproduce a routing mistake: let go of the wire before it is pressed into the fork.
 
@@ -91,7 +80,7 @@ def botch_fork(session, fork_id: str, mode: str) -> None:
     ex = session.expert
     i = session.route.index(fork_id)
     ex.current_fork = i
-    session._drive(_until_phase(ex._route_fork(i, 0, None), ex, stop), budget=60.0)
+    session._drive(run_until_phase(ex._route_fork(i, 0, None), ex, stop), budget=60.0)
     session._drive(session._clear_board(), budget=6.0)
 
 
@@ -104,7 +93,7 @@ def botch_connector(session) -> None:
     if not ex._connector_ok_to_grasp():
         session.relocate_connector()
     ex.current_fork = -1
-    session._drive(_until_phase(ex._insert_connector(auto_recover=False), ex, "connector_descend"), budget=60.0)
+    session._drive(run_until_phase(ex._insert_connector(auto_recover=False), ex, "connector_descend"), budget=60.0)
     session._drive(session._clear_board(), budget=6.0)
 
 

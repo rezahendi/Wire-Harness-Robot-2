@@ -71,8 +71,13 @@ class ToolBox:
     success verdict.
     """
 
-    def __init__(self, session: CellSession, max_fork_calls: int = 12, max_connector_calls: int = 8):
+    def __init__(self, session: CellSession, max_fork_calls: int = 12, max_connector_calls: int = 8,
+                 scenario: Optional[Any] = None):
         self.session = session
+        self.scenario = scenario                 # disturbances.Scenario for the recovery benchmark
+        self.disturbances: List[Dict[str, Any]] = []
+        if scenario is not None:
+            session.faults |= set(scenario.faults)
         self.max_fork_calls = max_fork_calls
         self.max_connector_calls = max_connector_calls
         self.fork_calls = 0
@@ -105,9 +110,24 @@ class ToolBox:
                 out = {"error": f"bad arguments for {name}: {exc}"}
             if name in PHYSICAL_TOOLS:
                 self.last_inspection = None           # the cell changed: earlier evidence is stale
+            self._fire_triggers(name, arguments or {}, out)
         self.calls.append({"name": name, "arguments": arguments, "result": out,
                            "sim_time": round(self.session.sim_time, 2)})
         return out
+
+    def _fire_triggers(self, name: str, arguments: Dict[str, Any], out: Dict[str, Any]) -> None:
+        """Scenario disturbances happen between tool calls; the planner meets their effect
+        in the next state it is shown, not in this result."""
+        if self.scenario is None or self.session.env is None:
+            return
+        for trig in self.scenario.triggers:
+            if trig.matches(name, arguments, out):
+                trig.fired = True
+                effect = trig.action(self.session)
+                event = {"label": trig.label, "after": name, "arguments": arguments,
+                         "sim_time": round(self.session.sim_time, 2), "effect": effect}
+                self.disturbances.append(event)
+                self.session._emit({"type": "disturbance", **event, "truth": self.session.truth()})
 
     # ------------------------------------------------------------ handlers
     def _status(self) -> Dict[str, Any]:

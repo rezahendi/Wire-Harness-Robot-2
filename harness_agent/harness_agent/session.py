@@ -37,6 +37,19 @@ from harness_core.perception import arclength_near, cable_crossing_in_fork
 from .spec import HarnessSpec, has_errors, robot_to_board, to_cell_config, validate
 
 
+def run_until_phase(gen: Generator, expert, phase: str) -> Generator:
+    """Run a skill generator until the expert enters ``phase``, then abandon it."""
+    try:
+        action = next(gen)
+        while expert.phase != phase:
+            obs = yield action
+            action = gen.send(obs)
+    except StopIteration:
+        return False
+    gen.close()
+    return True
+
+
 @dataclass
 class SkillResult:
     skill: str
@@ -88,6 +101,7 @@ class CellSession:
         self.finished = False
         self.env = None
         self.expert = None
+        self.faults: set = set()              # injected by a benchmark scenario, e.g. "slip_on_insert"
         self.inspector = inspector           # VisualInspector (or None: perception only)
         self.inspection_dir = inspection_dir
         self.visual_checks: List[Dict[str, Any]] = []
@@ -234,8 +248,14 @@ class CellSession:
         fixtures = [(fid, np.asarray(f[:2])) for fid, f in zip(self.route, obs["forks"])]
         nearest = min(((fid, float(np.linalg.norm(cp[:2] - p))) for fid, p in fixtures),
                       key=lambda x: x[1]) if fixtures else ("", float("inf"))
+        # tilt: how far the connector's long axis leaves the board plane (roll about it is free).
+        # A connector can sit in the pocket with one end up on a rail; its centre is then
+        # still within tolerance, so the pose check has to look at tilt and yaw too.
+        tilt = math.degrees(math.asin(min(1.0, abs(float(cR[2, 0])))))
+        yaw_err = math.degrees(wrap_angle(yaw_c - yaw_h))
         in_pocket = (abs(float(d @ xh)) < 0.004 and abs(float(d @ np.array([-xh[1], xh[0]]))) < 0.003
-                     and abs(float(cp[2] - hp[2])) < 0.003 and not standing)
+                     and abs(float(cp[2] - hp[2])) < 0.003 and not standing
+                     and tilt < 7.0 and abs(yaw_err) < 8.5)
         s_total = float(polyline_arclength(cable)[-1])
         last_routed = None
         for fid in self.route:
@@ -259,7 +279,8 @@ class CellSession:
                                           round(1000 * float(d @ np.array([-xh[1], xh[0]])), 1),
                                           round(1000 * float(cp[2] - hp[2]), 1)],
                 "standing_on_end": bool(standing),
-                "yaw_error_deg": round(math.degrees(wrap_angle(yaw_c - yaw_h)), 1),
+                "tilt_deg": round(tilt, 1),
+                "yaw_error_deg": round(yaw_err, 1),
                 "at_board_mm": [round(v) for v in robot_to_board(cp[:2], cfg)],
                 "nearest_fork": nearest[0],
                 "nearest_fork_distance_mm": round(1000 * nearest[1]),
@@ -343,6 +364,16 @@ class CellSession:
                                 f"the fingers would hit the fork, relocate it first")
         t_wall = time.perf_counter()
         self.expert.current_fork = -1
+        if "slip_on_insert" in self.faults:              # benchmark fault: lose the connector on the way
+            self.faults.discard("slip_on_insert")
+            run = self._drive(run_until_phase(self.expert._insert_connector(auto_recover=False), self.expert,
+                                              "connector_descend"), budget=60.0)
+            self._drive(self._clear_board(), budget=6.0)
+            run["messages"].append("the connector slipped out of the fingers above the holder")
+            self._emit({"type": "disturbance", "label": "connector slipped out of the fingers",
+                        "sim_time": self.sim_time, "truth": self.truth()})
+            return self._result("insert_connector", args, False, "grasp_slipped", run,
+                                time.perf_counter() - t_wall)
         run = self._drive(self.expert._insert_connector(auto_recover=False), budget=60.0)
         ok = bool(run["value"]) and run["reason"] == "done"
         outcome = "seated" if ok else _classify_connector_failure(run)

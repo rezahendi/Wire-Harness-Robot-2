@@ -86,6 +86,8 @@ class BuildResult:
     model: str = ""
     error: str = ""
     refused_verdicts: int = 0            # finish(success=true) calls refused for lack of evidence
+    scenario: str = "nominal"
+    disturbances: List[Dict[str, Any]] = field(default_factory=list)
 
     @property
     def success(self) -> bool:
@@ -96,7 +98,8 @@ class BuildResult:
                 "success": self.success, "report": self.report, "truth": self.truth,
                 "sim_time": round(self.sim_time, 1), "wall_time": round(self.wall_time, 1),
                 "turns": self.turns, "tool_calls": self.tool_calls, "messages": self.messages,
-                "usage": self.usage, "error": self.error, "refused_verdicts": self.refused_verdicts}
+                "usage": self.usage, "error": self.error, "refused_verdicts": self.refused_verdicts,
+                "scenario": self.scenario, "disturbances": self.disturbances}
 
 
 def opening_message(session: CellSession) -> str:
@@ -119,7 +122,8 @@ class ScriptedPolicy:
     def __init__(self, route: List[str], connector_id: str):
         self.route = route
         self.connector_id = connector_id
-        self.attempts: Dict[str, int] = {}
+        self.attempts: Dict[str, int] = {}      # route_fork calls per fork (for the report)
+        self.fails: Dict[str, int] = {}         # failed route_fork calls per fork
         self.inserts = 0
         self.stage = "start"
         self.inspection: Optional[Dict[str, Any]] = None
@@ -147,13 +151,17 @@ class ScriptedPolicy:
         state = (last or {}).get("state") or {}
         if last and last.get("outcome") == "protective_stop":
             return "finish", {"success": False, "report": "Protective stop; build aborted."}
+        if last and last.get("skill") == "route_fork" and not last.get("ok") and last.get("args"):
+            failed = last["args"].get("fork_id")
+            if failed and last.get("outcome") not in ("previous_fork_not_seated", "unknown_fork"):
+                self.fails[failed] = self.fails.get(failed, 0) + 1
         forks = state.get("forks") or {}
         todo = next((f for f in self.route if not forks.get(f, {}).get("wire_in_slot")), None)
         if todo is not None:
-            n = self.attempts.get(todo, 0)
+            n = self.fails.get(todo, 0)
             if n >= 3:
                 return "finish", {"success": False, "report": f"{todo} failed three times; stopped."}
-            self.attempts[todo] = n + 1
+            self.attempts[todo] = self.attempts.get(todo, 0) + 1
             return "route_fork", {"fork_id": todo, "attempt": n}
         conn = state.get("connector") or {}
         if conn.get("in_holder"):
@@ -192,9 +200,9 @@ class ScriptedPlanner:
         self.session = session
         self.log = log
 
-    def run(self, max_turns: int = 60) -> BuildResult:
+    def run(self, max_turns: int = 60, scenario: Optional[Any] = None) -> BuildResult:
         t0 = time.perf_counter()
-        box = ToolBox(self.session)
+        box = ToolBox(self.session, scenario=scenario)
         policy = ScriptedPolicy(self.session.route, self.session.connector_id)
         last: Optional[Dict[str, Any]] = None
         if self.session.feasible:
@@ -251,9 +259,9 @@ class NemotronPlanner:
         self.log = log
         self.extra = extra or {}
 
-    def run(self, max_turns: int = 40) -> BuildResult:
+    def run(self, max_turns: int = 40, scenario: Optional[Any] = None) -> BuildResult:
         t0 = time.perf_counter()
-        box = ToolBox(self.session)
+        box = ToolBox(self.session, scenario=scenario)
         tools = tool_schemas(self.session.route, self.session.connector_id)
         messages: List[Dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT},
                                           {"role": "user", "content": opening_message(self.session)}]
@@ -303,7 +311,9 @@ def _result(name: str, model: str, box: ToolBox, session: CellSession, t0: float
                        truth=session.truth() if session.env is not None else {"success": False},
                        sim_time=session.sim_time, wall_time=time.perf_counter() - t0, turns=turns,
                        tool_calls=box.calls, messages=transcript, usage=usage, model=model,
-                       refused_verdicts=box.refused_verdicts)
+                       refused_verdicts=box.refused_verdicts,
+                       scenario=box.scenario.name if box.scenario is not None else "nominal",
+                       disturbances=box.disturbances)
 
 
 def _fmt_args(args: Optional[Dict[str, Any]]) -> str:
