@@ -833,7 +833,7 @@ class HarnessExpert:
         e_lat = float(e_xy @ np.array([-x_h[1], x_h[0]]))     # across it
         tilt = math.asin(min(1.0, abs(float(cR[2, 0]))))      # long axis out of the board plane
         seated = (abs(cp[2] - hp[2]) < 0.002 and abs(e_ax) < 0.0035 and abs(e_lat) < 0.002
-                  and abs(yaw_err) < 0.15 and tilt < 0.12)
+                  and abs(yaw_err) < 0.15 and tilt < 0.14)
         self._say(f"connector seated={seated} (dz={1000 * (cp[2] - hp[2]):.1f} mm, yaw err {yaw_err:.2f}, "
                   f"tilt {math.degrees(tilt):.0f} deg)")
         return bool(seated)

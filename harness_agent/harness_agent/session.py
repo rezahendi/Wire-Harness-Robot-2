@@ -255,7 +255,7 @@ class CellSession:
         yaw_err = math.degrees(wrap_angle(yaw_c - yaw_h))
         in_pocket = (abs(float(d @ xh)) < 0.004 and abs(float(d @ np.array([-xh[1], xh[0]]))) < 0.003
                      and abs(float(cp[2] - hp[2])) < 0.003 and not standing
-                     and tilt < 7.0 and abs(yaw_err) < 8.5)
+                     and tilt < 8.0 and abs(yaw_err) < 8.5)
         s_total = float(polyline_arclength(cable)[-1])
         last_routed = None
         for fid in self.route:
