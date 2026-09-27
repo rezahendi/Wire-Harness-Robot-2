@@ -370,8 +370,24 @@ route it again"), inspected before every `finish` (the evidence gate never had t
 never claimed a build it had not finished. Every failure, for both planners, was the same: the
 connector slipped onto the holder rails and the fingers could not get around it; after four
 inserts both stopped, as their rules say. Nemotron's reasoning considered relocating it first,
-but stuck to the stop rule. That recovery was in neither the prompt nor the script, so one line
-now says it (grasp trouble on insert: relocate, then insert again), in both.
+but stuck to the stop rule.
+
+Each later round fixed what the previous one exposed, always in both planners, since the
+point is to compare them on the same knowledge:
+
+| round | change | scripted (slip + both) | Nemotron (slip + both) |
+|---|---|---|---|
+| 1 | - | 9/10 | 8/10 |
+| 2 | recovery rule: grasp trouble on insert, relocate the connector, then insert again | 10/10 | 9/10 |
+| 3 | `relocate_connector` checks its own result (`still_on_holder`) instead of trusting the move; retry up to three times | 10/10 | 8/10 |
+| 4 | the grasp check knows the holder, not only the forks; re-routing a fork that lost its wire starts at attempt 0 | see the final run | see the final run |
+
+Round 3 is a reminder that five builds per scenario is a small sample: the physics differs
+between the two planners from the first extra `get_status` on, so a one-build difference is
+noise. The two round-3 failures were a relocation that dragged the connector back against the
+holder (the grasp check approved a spot where the fingers land on the holder walls) and a popped
+fork re-routed with attempt 1, which picks the wire further along and left F3's carry so taut that
+it pulled F2 out again and the connector off the board edge.
 
 **Harness specs** are YAML in board millimetres, as on a drawing:
 

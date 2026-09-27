@@ -28,7 +28,9 @@ def tool_schemas(route: List[str], connector_id: str) -> List[Dict[str, Any]]:
            "force feedback. Forks must be routed in route order.",
            {"fork_id": {"type": "string", "enum": list(route), "description": "fork to route"},
             "attempt": {"type": "integer", "minimum": 0, "maximum": 3,
-                        "description": "0 for the first try; each increment picks the wire 20 mm further along"},
+                        "description": "failed tries of this fork so far: 0 for the first try (and when "
+                                       "re-routing a fork that lost the wire later); each increment picks "
+                                       "the wire 20 mm further along"},
             "pick_offset_mm": {"type": "number", "minimum": -20, "maximum": 60,
                                "description": "optional explicit shift of the pick point along the wire"}},
            ["fork_id"]),

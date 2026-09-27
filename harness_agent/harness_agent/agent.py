@@ -40,7 +40,8 @@ How a build works:
    the wire, because the wire is anchored at the previous fork.
 3. Every skill result contains the new state of the cell; read it before the next step
    (get_status is only needed for a fresh look). If a fork that held the wire before has
-   lost it, route that fork again before going on.
+   lost it, route that fork again before going on, starting from attempt 0: the attempt
+   number counts failed tries of that fork, and losing the wire later is not one.
 4. Seat the connector only when every fork holds the wire. If it stands on its end, tip it
    over. If it lies against a fork, relocate it. Then insert it.
 5. Finish in three calls: retreat (the camera needs the arm out of the way), inspect with
@@ -160,6 +161,8 @@ class ScriptedPolicy:
             self.stage = "finishing"
             return "inspect", {"target": "all"}
         state = (last or {}).get("state") or {}
+        if last and "budget used up" in str(last.get("error", "")):
+            return "finish", {"success": False, "report": f"Stopped: {last['error']}."}
         if last and last.get("outcome") == "protective_stop":
             return "finish", {"success": False, "report": "Protective stop; build aborted."}
         if last and last.get("skill") == "route_fork" and not last.get("ok") and last.get("args"):

@@ -63,6 +63,7 @@ def test_relocation_must_leave_the_connector_flat_and_clear_of_the_holder():
     assert not connector_lies_clear(on_rail)
     assert not connector_lies_clear(dict(board, tilt_deg=20.0))
     assert not connector_lies_clear(dict(board, offset_from_holder_mm=[5.0, 10.0, -1.5]))
+    assert not connector_lies_clear(dict(board, holder_in_finger_path=True))    # fingers would hit the holder
 
 
 def test_scripted_policy_retries_a_stuck_relocation_three_times():

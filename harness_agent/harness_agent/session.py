@@ -260,6 +260,12 @@ class CellSession:
         in_pocket = (abs(float(d @ xh)) < 0.004 and abs(float(d @ np.array([-xh[1], xh[0]]))) < 0.003
                      and abs(float(cp[2] - hp[2])) < 0.003 and not standing
                      and tilt < 8.0 and abs(yaw_err) < 8.5)
+        # would the open fingers come down on the holder? (same footprint test the expert
+        # applies to the forks: fingers close across the connector)
+        dh = hp[:2] - cp[:2]
+        cy, sy = math.cos(yaw_c), math.sin(yaw_c)
+        lx, ly = cy * dh[0] + sy * dh[1], -sy * dh[0] + cy * dh[1]
+        holder_in_path = (not in_pocket) and abs(lx) < 0.013 + 0.017 and abs(ly) < 0.036 + 0.017
         s_total = float(polyline_arclength(cable)[-1])
         last_routed = None
         for fid in self.route:
@@ -283,6 +289,7 @@ class CellSession:
                                           round(1000 * float(d @ np.array([-xh[1], xh[0]])), 1),
                                           round(1000 * float(cp[2] - hp[2]), 1)],
                 "standing_on_end": bool(standing),
+                "holder_in_finger_path": bool(holder_in_path),
                 "tilt_deg": round(tilt, 1),
                 "yaw_error_deg": round(yaw_err, 1),
                 "at_board_mm": [round(v) for v in robot_to_board(cp[:2], cfg)],
@@ -366,6 +373,10 @@ class CellSession:
             return self._refuse("insert_connector", args, "connector_blocked",
                                 f"the connector lies {c['nearest_fork_distance_mm']} mm from {c['nearest_fork']}; "
                                 f"the fingers would hit the fork, relocate it first")
+        if c.get("holder_in_finger_path"):          # the expert's grasp check only knows the forks
+            return self._refuse("insert_connector", args, "connector_blocked",
+                                "the connector lies on or against its holder, where the fingers cannot get "
+                                "around it; relocate it first")
         t_wall = time.perf_counter()
         self.expert.current_fork = -1
         if "slip_on_insert" in self.faults:              # benchmark fault: lose the connector on the way
@@ -534,7 +545,7 @@ def connector_lies_clear(conn: Dict[str, Any]) -> bool:
     holder's rails or walls it sits 3-12 mm above it."""
     off = conn["offset_from_holder_mm"]
     flat = (not conn["standing_on_end"]) and conn.get("tilt_deg", 0.0) < 15.0 and -5.0 < off[2] < 2.0
-    return flat and float(np.hypot(off[0], off[1])) > 25.0
+    return flat and not conn.get("holder_in_finger_path", False) and float(np.hypot(off[0], off[1])) > 25.0
 
 
 def _classify_fork_failure(run: Dict[str, Any]) -> str:
