@@ -226,7 +226,8 @@ def annotate(run_dir: str, out_name: str = "video_annotated.mp4", fps: int = 16,
             k = next((i for i, e in enumerate(ends) if e > t + 1e-6), len(ends))
             writer.append_data(np.asarray(draw(frame, t, k)))
         if frames:
-            last = np.asarray(draw(frames[-1], times[-1], len(calls)))
+            # the closing frame: after the last call (the inspection may come after the last frame)
+            last = np.asarray(draw(frames[-1], max(times[-1], ends[-1] if ends else 0.0), len(calls)))
             for _ in range(3 * fps):                     # hold the verdict for three seconds
                 writer.append_data(last)
     finally:

@@ -55,6 +55,26 @@ def test_scripted_policy_relocates_a_connector_it_cannot_grasp():
     assert policy.next(moved, True) == ("insert_connector", {})
 
 
+def test_relocation_must_leave_the_connector_flat_and_clear_of_the_holder():
+    from harness_agent.session import connector_lies_clear
+    board = {"standing_on_end": False, "tilt_deg": 3.0, "offset_from_holder_mm": [30.0, 60.0, -1.5]}
+    assert connector_lies_clear(board)
+    on_rail = dict(board, offset_from_holder_mm=[5.7, 15.1, 8.8], tilt_deg=14.5)   # seen after a failed lift
+    assert not connector_lies_clear(on_rail)
+    assert not connector_lies_clear(dict(board, tilt_deg=20.0))
+    assert not connector_lies_clear(dict(board, offset_from_holder_mm=[5.0, 10.0, -1.5]))
+
+
+def test_scripted_policy_retries_a_stuck_relocation_three_times():
+    policy = ScriptedPolicy(["F1"], "X1")
+    done = {"forks": {"F1": {"wire_in_slot": True}}, "connector": {"in_holder": False, "standing_on_end": False}}
+    stuck = {"skill": "relocate_connector", "ok": False, "outcome": "still_on_holder", "state": done}
+    assert policy.next(stuck, True) == ("relocate_connector", {})
+    assert policy.next(stuck, True) == ("relocate_connector", {})
+    name, args = policy.next(stuck, True)
+    assert name == "finish" and args["success"] is False
+
+
 def test_summary_table_counts_successes_and_honest_verdicts():
     rows = [{"planner": "scripted", "scenario": "nominal", "seed": s, "success": s != 1, "honest": True,
              "tool_calls": 8, "robot_s": 70.0, "tokens": 0} for s in range(3)]

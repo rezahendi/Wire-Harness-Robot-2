@@ -65,7 +65,10 @@ Recovery:
   after four insertion attempts.
 - insert_connector ends with grasp_slipped, grasp_failed or grasp_blocked_by_fixture: the
   connector is lying on or against its holder, where the fingers cannot get around it.
-  Call relocate_connector (it lifts it off and lays it down clear), then insert again.
+  Call relocate_connector (it lifts it off and lays it down clear), then insert again. Do
+  this after every such failure, not only the first. If relocate_connector reports
+  still_on_holder, call it again (it often frees the connector on a later try); after three
+  relocations in a row that leave it on the holder, stop and report.
 - protective_stop: stop at once and report; do not retry.
 - A tool that refuses (outcome such as previous_fork_not_seated or connector_standing)
   tells you what to do first. Do that.
@@ -131,6 +134,7 @@ class ScriptedPolicy:
         self.connector_id = connector_id
         self.attempts: Dict[str, int] = {}      # route_fork calls per fork (for the report)
         self.fails: Dict[str, int] = {}         # failed route_fork calls per fork
+        self.stuck = 0                          # relocations in a row that left the connector on the holder
         self.inserts = 0
         self.stage = "start"
         self.inspection: Optional[Dict[str, Any]] = None
@@ -182,6 +186,14 @@ class ScriptedPolicy:
             return "relocate_connector", {}
         if last and last.get("skill") == "insert_connector" and last.get("outcome") in GRASP_TROUBLE:
             return "relocate_connector", {}
+        if last and last.get("outcome") == "still_on_holder":
+            self.stuck += 1
+            if self.stuck >= 3:
+                return "finish", {"success": False, "report": "The connector is stuck on its holder: three "
+                                                               "relocations could not lift it clear."}
+            return "relocate_connector", {}
+        if last and last.get("skill") == "relocate_connector":
+            self.stuck = 0
         self.inserts += 1
         return "insert_connector", {}
 

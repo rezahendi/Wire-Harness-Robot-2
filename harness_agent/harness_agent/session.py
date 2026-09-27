@@ -399,9 +399,16 @@ class CellSession:
             return self._refuse("relocate_connector", args, "infeasible_spec", "the spec failed validation")
         t_wall = time.perf_counter()
         run = self._drive(self.expert._relocate_connector(), budget=40.0)
-        ok = run["reason"] == "done" and bool(self.expert._connector_ok_to_grasp())
-        return self._result("relocate_connector", args, ok, "graspable" if ok else "still_blocked",
-                            run, time.perf_counter() - t_wall)
+        conn = self.perceive(self.settled_obs(0.3))["connector"]
+        clear = connector_lies_clear(conn)
+        ok = run["reason"] == "done" and bool(self.expert._connector_ok_to_grasp()) and clear
+        if ok:
+            outcome = "graspable"
+        elif not clear and float(np.hypot(*conn["offset_from_holder_mm"][:2])) < 40.0:
+            outcome = "still_on_holder"         # e.g. the lift hit the force limit: the wire is too short
+        else:
+            outcome = "still_blocked"
+        return self._result("relocate_connector", args, ok, outcome, run, time.perf_counter() - t_wall)
 
     def retreat(self) -> SkillResult:
         args: Dict[str, Any] = {}
@@ -519,6 +526,15 @@ class CellSession:
             self._camera = None
         if self.env is not None:
             self.env.close()
+
+
+def connector_lies_clear(conn: Dict[str, Any]) -> bool:
+    """Perceived connector lying flat on the board, clear of its holder: the state relocation
+    has to leave it in. On the board its centre sits ~1.5 mm below the seat height; on the
+    holder's rails or walls it sits 3-12 mm above it."""
+    off = conn["offset_from_holder_mm"]
+    flat = (not conn["standing_on_end"]) and conn.get("tilt_deg", 0.0) < 15.0 and -5.0 < off[2] < 2.0
+    return flat and float(np.hypot(off[0], off[1])) > 25.0
 
 
 def _classify_fork_failure(run: Dict[str, Any]) -> str:
