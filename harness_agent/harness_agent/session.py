@@ -25,7 +25,7 @@ import math
 import os
 import time
 from dataclasses import asdict, dataclass, field
-from typing import Any, Callable, Dict, Generator, List, Optional
+from typing import Any, Callable, Dict, Generator, List, Optional, Tuple
 
 import numpy as np
 
@@ -82,7 +82,8 @@ class CellSession:
                  base_cfg: Optional[CellConfig] = None, max_sim_time: float = 900.0,
                  render: bool = False, camera: str = "overview", frame_every: float = 0.5,
                  on_event: Optional[Callable[[Dict[str, Any]], None]] = None,
-                 inspector: Optional[Any] = None, inspection_dir: Optional[str] = None):
+                 inspector: Optional[Any] = None, inspection_dir: Optional[str] = None,
+                 render_size: Tuple[int, int] = (480, 640)):
         from harness_learning.env import HarnessRoutingEnv   # imported late: pulls in MuJoCo
 
         self.spec = spec
@@ -96,6 +97,7 @@ class CellSession:
         self.max_sim_time = max_sim_time
         self.frame_every = frame_every
         self.frames: List[np.ndarray] = []
+        self.frame_times: List[float] = []   # sim time of each frame (for the annotated video)
         self.events: List[Dict[str, Any]] = []
         self.on_event = on_event
         self.finished = False
@@ -111,7 +113,8 @@ class CellSession:
         if self.feasible:
             self.env = HarnessRoutingEnv(cfg=self.cfg, randomize=randomize,
                                          max_episode_time=max_sim_time + 60.0,
-                                         render_mode="rgb_array" if render else None, camera=camera)
+                                         render_mode="rgb_array" if render else None, camera=camera,
+                                         render_size=tuple(render_size))
             self.env.reset(seed=seed)
             self.expert = HarnessExpert(self.cfg, self.env.spec_actions)
             self.expert._last_obs = self.env.last_obs_dict
@@ -132,6 +135,7 @@ class CellSession:
             return
         if force or self.sim_time - self._last_frame_t >= self.frame_every:
             self.frames.append(self.env.render())
+            self.frame_times.append(round(self.sim_time, 3))
             self._last_frame_t = self.sim_time
 
     def _emit(self, event: Dict[str, Any]) -> None:

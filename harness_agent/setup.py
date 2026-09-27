@@ -27,6 +27,7 @@ setup(
             'check_nebius = harness_agent.check_nebius:main',
             'vision_eval = harness_agent.vision_eval:main',
             'benchmark = harness_agent.benchmark:main',
+            'annotate_video = harness_agent.annotate:main',
         ],
     },
 )

@@ -160,7 +160,8 @@ def main(argv: Optional[list] = None) -> int:
                                       refs=None if args.vision_refs == "none" else args.vision_refs)
     session = CellSession(spec, seed=args.seed, randomize=args.randomize, render=args.video,
                           frame_every=0.25, inspector=inspector,
-                          inspection_dir=os.path.join(out, "inspection") if inspector else None)
+                          inspection_dir=os.path.join(out, "inspection") if inspector else None,
+                          render_size=(960, 1280) if args.video else (480, 640))
     print(f"{spec.name} rev {spec.revision}: route {' > '.join(session.route)} > {session.connector_id}, "
           f"planner {args.planner}, seed {args.seed}")
     for i in session.issues:
@@ -186,6 +187,7 @@ def main(argv: Optional[list] = None) -> int:
     result["events"] = session.events
     result["session"] = session.summary()
     result["visual_checks"] = session.visual_checks
+    result["frame_times"] = session.frame_times
     if client is not None and not result.get("usage"):
         result["usage"] = client.usage.as_dict()
     with open(os.path.join(out, "trace.json"), "w", encoding="utf-8") as f:
@@ -193,7 +195,11 @@ def main(argv: Optional[list] = None) -> int:
     write_report(os.path.join(out, "report.md"), spec, result, session)
     if args.video and session.frames:
         import imageio
+
+        from .annotate import annotate
         imageio.mimsave(os.path.join(out, "video.mp4"), session.frames, fps=16, macro_block_size=1)
+        annotate(out, frames=session.frames, frame_times=session.frame_times, title=spec.name)
+        print(f"video: {os.path.join(out, 'video.mp4')} and video_annotated.mp4")
     print(f"\n{'SUCCESS' if result['success'] else 'FAILED'} in {result['sim_time']} s robot time "
           f"({result['wall_time']} s wall) -> {out}")
     if result.get("error"):

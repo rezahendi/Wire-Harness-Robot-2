@@ -268,8 +268,12 @@ ros2 run harness_agent run_build --spec $SPECS/demo_infeasible.yaml --planner ne
 
 Each run writes `drawing.png` (the formboard drawing generated from the spec), `report.md`
 (every step with its outcome), `trace.json` (tool calls, model messages, token usage, ground
-truth), with `--vision` the inspection photos in `inspection/`, and optionally `video.mp4` to
-`runs/<spec>_<planner>_<seed>/`.
+truth), with `--vision` the inspection photos in `inspection/`, and with `--video` both
+`video.mp4` and `video_annotated.mp4` to `runs/<spec>_<planner>_<seed>/`. The annotated video
+puts the cell next to the planner: the step that is running, the steps so far with their
+outcomes, the model's reasoning for the current step, disturbances as they happen, and at the end
+the inspection photos with the camera's verdicts and whether the planner's verdict matches the
+simulator (`python -m harness_agent.annotate <run folder>` redoes it for an existing run).
 
 **No success without evidence.** `finish(success=true)` is refused unless an `inspect` of
 everything, made after the last physical skill and with the arm retreated out of the camera's

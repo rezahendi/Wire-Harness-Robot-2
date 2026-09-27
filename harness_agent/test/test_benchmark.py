@@ -65,3 +65,35 @@ def test_scripted_planner_recovers_from_a_popped_wire_and_a_slipped_connector():
     assert [d["label"] for d in res.disturbances] == ["wire pulled out of F2"]
     assert any(c["result"].get("outcome") == "grasp_slipped" for c in res.tool_calls)
     assert res.success and res.claimed_success
+
+
+def test_annotated_video_follows_the_tool_calls(tmp_path):
+    import json
+
+    import imageio
+    import numpy as np
+
+    from harness_agent.annotate import _reasoning_per_call, annotate
+
+    trace = {"planner": "nemotron", "model": "nvidia/nemotron-3-super-120b-a12b", "scenario": "popped_wire",
+             "session": {"spec": "test board"}, "success": True, "claimed_success": True,
+             "tool_calls": [{"name": "route_fork", "arguments": {"fork_id": "F1"}, "sim_time": 1.0,
+                             "result": {"ok": True, "outcome": "routed"}},
+                            {"name": "route_fork", "arguments": {"fork_id": "F2"}, "sim_time": 2.0,
+                             "result": {"ok": False, "outcome": "previous_fork_not_seated"}},
+                            {"name": "finish", "arguments": {"success": True}, "sim_time": 2.0,
+                             "result": {"ok": True, "recorded": {"success": True}}}],
+             "messages": [{"role": "assistant", "reasoning": "route F1 first"}, {"role": "tool"},
+                          {"role": "assistant", "content": "then F2"}, {"role": "tool"},
+                          {"role": "assistant", "reasoning": "done"}, {"role": "tool"}],
+             "disturbances": [{"label": "wire pulled out of F1", "sim_time": 1.2}]}
+    with open(tmp_path / "trace.json", "w") as f:
+        json.dump(trace, f)
+    assert _reasoning_per_call(trace) == ["route F1 first", "then F2", "done"]
+    frames = [np.full((48, 64, 3), 40 * k, np.uint8) for k in range(5)]
+    path = annotate(str(tmp_path), frames=frames, frame_times=[0.0, 0.5, 1.0, 1.5, 2.0], fps=4)
+    reader = imageio.get_reader(path)
+    n = reader.count_frames()
+    shape = reader.get_data(0).shape
+    reader.close()
+    assert n == 5 + 3 * 4 and shape == (1080, 1920, 3)       # frames + a three-second hold on the verdict
