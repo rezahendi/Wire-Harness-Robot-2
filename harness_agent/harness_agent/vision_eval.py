@@ -235,6 +235,8 @@ def make_refs(ref_dir: str, spec_path: str, seed: int, randomize: bool = True, l
 
     Picks a seated and a not-seated example of each fixture kind; for the not-seated fork
     it prefers a wire lying close to the fork (the case models get wrong)."""
+    from harness_core.render_util import choose_gl_backend
+    choose_gl_backend()
     os.makedirs(ref_dir, exist_ok=True)
     cands: Dict[Tuple[str, bool], List[Tuple[int, Any, Any]]] = {}
 
