@@ -311,7 +311,10 @@ is the fix: both views look straight *through* the slot from opposite sides (a s
 as orange inside the gap; otherwise the gap is empty), the fixture to check is boxed in magenta,
 and the model answers one local question per view ("is there orange wire in the gap between the
 prongs?"). The code, not the model, combines them: seated only if both views say yes. `v2refs`
-adds two labelled example images from a build outside the set. On 134 labelled images (60 not
+adds two labelled example images from a build outside the set. Style v3 then looked 25 degrees
+off the slot axis and spelled out that a wire running through the gap is also seen in front of
+and behind the fork (Kimi's unanswered images were all seated wires pointing straight at the
+camera, which the v2 wording called "in front of the fork"). On 134 labelled images (60 not
 seated, 15 of them hard cases such as a wire resting on the lips):
 
 | check | accuracy | defects caught | false alarms | hard defects caught | median latency |
@@ -320,23 +323,20 @@ seated, 15 of them hard cases such as a wire resting on the lips):
 | Gemma 3 27B, v1 | 60% | 12% | 0% | 13% | 3.0 s |
 | MiniCPM-V 4.5, v1 | 74% | 50% | 7% | 7% | 0.7 s |
 | MiniCPM-V 4.5, v2 | 79% | 63% | 8% | 40% | 0.8 s |
+| MiniCPM-V 4.5, v3 | 75% | 45% | 1% | 40% | 0.8 s |
 | Gemma 3 27B, v2refs | 77% | 57% | 7% | 33% | 2.1 s |
-| Kimi K3, v2refs | 69% (98% of the 70% it answers) | 92% | 3% | 93% | 12.6 s |
-| **Kimi K3 v2refs, MiniCPM-V v2 when Kimi has no answer** | **96%** | **97%** | **5%** | **100%** | |
+| Kimi K3, v2refs | 69% (92 of the 94 it answers) | 92% | 3% | 93% | 12.6 s |
+| Kimi K3, v3refs | 85% (all 114 it answers) | 88% | 0% | 80% | 16.0 s |
+| Kimi K3 v2refs, MiniCPM-V v2 when Kimi has no answer | 96% | 97% | 5% | 100% | |
+| **Kimi K3 v3refs, MiniCPM-V v3 when Kimi has no answer** | **96%** | **93%** | **1%** | **87%** | |
 
-Kimi K3 is a reasoning model: with the examples it is right on 92 of the 94 images it answers,
-but on 40 it spends its 4,000-token budget thinking. MiniCPM-V answers those in under a second.
-That pair is the default camera check (`default_inspector`, the examples ship in `refs/`).
-It also caught the one defect perception missed: a connector sitting tilted in its pocket, which
-the pose check accepts because it does not look at tilt.
-
-The tilted connector also led to a fix: the pose check and the insert skill's own seat check
-now look at tilt (a connector with one end up on a rail has its centre in tolerance).
-
-Looking at where Kimi ran out of budget explained why: they are all seated wires that run from
-the slot straight towards the camera, so they hide the gap they run through, and the question
-said a wire "in front of the fork" does not count. Style v3 looks into the slot 25 degrees off
-its axis and says that a wire through the gap is also seen in front of and behind the fork.
+Kimi K3 is a reasoning model: with v3 and the examples it answered 114 of the 134 images and was
+right on every one; on the other 20 it spends its 4,000-token budget thinking, and MiniCPM-V
+answers in under a second. The small models did not gain from v3 (they called more fixtures
+seated), and the examples made MiniCPM-V worse, so it runs without them. The last pair is the
+default camera check (`default_inspector`; the examples ship in `refs/`): 5 errors in 134, all
+from the fallback, 1% false alarms. It also catches the one defect perception missed, a connector
+sitting tilted in its pocket ("one end higher than the other, resting on a rail").
 
 **Recovery benchmark.** Things go wrong on a real line between two robot moves, and a
 supervisor earns its keep by noticing. `benchmark` runs planners through the same builds with
@@ -357,6 +357,21 @@ ros2 run harness_agent benchmark --planners nemotron --seeds 0-4 --out runs/benc
 The table counts builds that succeeded (ground truth), honest verdicts (the final claim matched
 the truth), steps, robot time and model tokens per build. Runs already in `--out` are skipped, so
 planners can be added at different times and on different machines.
+
+First round, five randomised layouts per scenario:
+
+| planner | nominal | popped wire | connector slip | both | honest verdicts | tokens per build |
+|---|---|---|---|---|---|---|
+| scripted rules | 5/5 | 5/5 | 5/5 | 4/5 | 20/20 | - |
+| Nemotron 3 Super | 5/5 | 5/5 | 5/5 | 3/5 | 20/20 | 32k-63k |
+
+Nemotron recovered every popped wire from the refused `route_fork` alone ("F2 lost the wire,
+route it again"), inspected before every `finish` (the evidence gate never had to step in), and
+never claimed a build it had not finished. Every failure, for both planners, was the same: the
+connector slipped onto the holder rails and the fingers could not get around it; after four
+inserts both stopped, as their rules say. Nemotron's reasoning considered relocating it first,
+but stuck to the stop rule. That recovery was in neither the prompt nor the script, so one line
+now says it (grasp trouble on insert: relocate, then insert again), in both.
 
 **Harness specs** are YAML in board millimetres, as on a drawing:
 

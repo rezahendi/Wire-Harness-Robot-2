@@ -108,7 +108,7 @@ def test_inspector_reports_unusable_answers_and_failed_calls():
     refs = {"fork": [(img, "fork seated"), (img, "fork NOT seated")]}
     fs = FakeVisionClient()
     v = VisualInspector(fs, references=refs).ask("fork", "F1", img)
-    assert fs.calls[0]["images"] == 3 and v.seated is True and v.style == "v2refs"
+    assert fs.calls[0]["images"] == 3 and v.seated is True and v.style == "v3refs"
     assert v.prompt_tokens == 100
 
 
@@ -139,7 +139,7 @@ def test_default_inspector_uses_the_measured_best_pair(monkeypatch):
     assert packaged_references_dir() is not None
     client = FakeVisionClient(models=["google/gemma-3-27b-it", "moonshotai/Kimi-K3", "openbmb/MiniCPM-V-4_5"])
     insp = default_inspector(client)
-    assert insp.model == "moonshotai/Kimi-K3" and insp.style == "v2"
+    assert insp.model == "moonshotai/Kimi-K3" and insp.style == "v3"
     assert [len(insp.references[k]) for k in ("fork", "connector")] == [2, 2]
     assert insp.fallback.model == "openbmb/MiniCPM-V-4_5" and not insp.fallback.references
     assert default_inspector(client, fallback_model="none").fallback is None

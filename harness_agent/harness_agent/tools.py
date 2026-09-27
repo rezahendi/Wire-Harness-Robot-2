@@ -36,8 +36,9 @@ def tool_schemas(route: List[str], connector_id: str) -> List[Dict[str, Any]]:
            "The connector stands on its end: grasp the wire close to it and pull it over so it "
            "lies flat."),
         fn("relocate_connector",
-           "The connector lies where the fingers cannot reach it (next to a fork): drag it to a "
-           "free spot near the holder."),
+           "The connector lies where the fingers cannot get around it (next to a fork, or on top of "
+           "its holder's rails or walls): lift it by the wire and lay it down flat on a free spot "
+           "near the holder."),
         fn("insert_connector",
            f"Grasp connector {connector_id}, approach its holder from behind, find the pocket with a "
            "force-controlled spiral search and press it home. Only when every fork holds the wire."),

@@ -44,6 +44,17 @@ def test_scripted_policy_counts_failed_attempts_only():
     assert policy.next(failed, True) == ("route_fork", {"fork_id": "F1", "attempt": 1})
 
 
+def test_scripted_policy_relocates_a_connector_it_cannot_grasp():
+    policy = ScriptedPolicy(["F1"], "X1")
+    done = {"forks": {"F1": {"wire_in_slot": True}}, "connector": {"in_holder": False, "standing_on_end": False}}
+    assert policy.next({"state": done}, True) == ("insert_connector", {})
+    for outcome in ("grasp_slipped", "grasp_failed", "grasp_blocked_by_fixture"):
+        failed = {"skill": "insert_connector", "ok": False, "outcome": outcome, "state": done}
+        assert policy.next(failed, True) == ("relocate_connector", {})
+    moved = {"skill": "relocate_connector", "ok": True, "outcome": "graspable", "state": done}
+    assert policy.next(moved, True) == ("insert_connector", {})
+
+
 def test_summary_table_counts_successes_and_honest_verdicts():
     rows = [{"planner": "scripted", "scenario": "nominal", "seed": s, "success": s != 1, "honest": True,
              "tool_calls": 8, "robot_s": 70.0, "tokens": 0} for s in range(3)]

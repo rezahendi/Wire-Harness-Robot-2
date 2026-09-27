@@ -28,5 +28,35 @@
    "caption": "fork NOT seated: the gap between the prongs is empty; the wire lies on the board next to the fork. Answer A no, B no.",
    "stage": "next"
   }
+ ],
+ "v3": [
+  {
+   "kind": "connector",
+   "seated": true,
+   "image": "connector_yes_v3.jpg",
+   "caption": "connector seated: it lies flat, fully inside the green pocket. Answer A yes, B yes.",
+   "stage": "inserted"
+  },
+  {
+   "kind": "connector",
+   "seated": false,
+   "image": "connector_no_v3.jpg",
+   "caption": "connector NOT seated: it is not down in the pocket. Answer A no, B no.",
+   "stage": "botched"
+  },
+  {
+   "kind": "fork",
+   "seated": true,
+   "image": "fork_yes_v3.jpg",
+   "caption": "fork seated: the orange wire runs through the gap between the two prongs, below the yellow knobs. Answer A yes, B yes.",
+   "stage": "routed"
+  },
+  {
+   "kind": "fork",
+   "seated": false,
+   "image": "fork_no_v3.jpg",
+   "caption": "fork NOT seated: the gap between the prongs is empty; the wire lies on the board next to the fork. Answer A no, B no.",
+   "stage": "next"
+  }
  ]
 }

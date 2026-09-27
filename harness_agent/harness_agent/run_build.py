@@ -132,7 +132,7 @@ def main(argv: Optional[list] = None) -> int:
                     help="vision model id (default: the measured-best one your key can use, Kimi K3)")
     ap.add_argument("--vision-fallback", default=None,
                     help="model that answers when the first gives no verdict (default: MiniCPM-V; 'none')")
-    ap.add_argument("--vision-style", default="v2", choices=("v1", "v2", "v3"), help="camera views and question style")
+    ap.add_argument("--vision-style", default="v3", choices=("v1", "v2", "v3"), help="camera views and question style")
     ap.add_argument("--vision-refs", default="packaged",
                     help="labelled example images: 'packaged' (default), a refs/ folder, or 'none'")
     ap.add_argument("--out", default=None, help="output directory (default: runs/<spec>_<planner>_<seed>)")

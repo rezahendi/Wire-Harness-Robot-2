@@ -40,7 +40,7 @@ from .llm import LLMError, TokenFactoryClient
 ImageLike = Union[np.ndarray, Any]          # an RGB array or a PIL image (PIL is imported lazily)
 Box = Optional[Tuple[float, float, float, float]]
 STYLES = ("v1", "v2", "v3")
-DEFAULT_STYLE = "v2"
+DEFAULT_STYLE = "v3"
 HIGHLIGHT = (255, 0, 255)                   # magenta: no fixture, wire or board has that colour
 
 # Viewpoints (name, azimuth offset in deg, elevation in deg, distance in m), per style and
@@ -533,16 +533,16 @@ def packaged_references_dir() -> Optional[str]:
         return None
 
 
-# The combination that measured best on 134 labelled renders (vision_eval, style v2):
-# Kimi K3 with the labelled examples answers 70% of the images and is right on 98% of those;
-# when it runs out of reasoning budget, MiniCPM-V 4.5 (v2, no examples: they made it worse)
-# answers in under a second. Together: 96% accuracy, 97% of defects caught, 5% false alarms.
+# The combination that measured best on 134 labelled renders (vision_eval): Kimi K3 with
+# style v3 and two labelled examples answers 85% of the images and was right on every one;
+# when it runs out of reasoning budget, MiniCPM-V 4.5 (v3, no examples: they make it worse)
+# answers in under a second. Together: 96% accuracy, 93% of defects caught, 1% false alarms.
 PRIMARY_PREFERENCE = ("kimi-k3",)
 FALLBACK_PREFERENCE = ("minicpm-v", "gemma-3")
 
 
 def default_inspector(client: Optional[Any] = None, model: Optional[str] = None,
-                      fallback_model: Optional[str] = None, style: str = DEFAULT_STYLE,
+                      fallback_model: Optional[str] = None, style: str = "v3",
                       refs: Optional[str] = "packaged") -> "VisualInspector":
     """The measured-best camera check with what this key can use.
 

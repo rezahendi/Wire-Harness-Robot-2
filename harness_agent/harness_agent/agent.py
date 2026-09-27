@@ -63,6 +63,9 @@ Recovery:
 - After three failed attempts on the same fork, stop and report.
 - not_seated or not_seated_after_search: check the connector state and insert again. Stop
   after four insertion attempts.
+- insert_connector ends with grasp_slipped, grasp_failed or grasp_blocked_by_fixture: the
+  connector is lying on or against its holder, where the fingers cannot get around it.
+  Call relocate_connector (it lifts it off and lays it down clear), then insert again.
 - protective_stop: stop at once and report; do not retry.
 - A tool that refuses (outcome such as previous_fork_not_seated or connector_standing)
   tells you what to do first. Do that.
@@ -116,6 +119,10 @@ def opening_message(session: CellSession) -> str:
 
 
 # --------------------------------------------------------------- policies
+# insert_connector outcomes that mean the fingers could not get around the connector
+GRASP_TROUBLE = ("grasp_slipped", "grasp_failed", "grasp_blocked_by_fixture")
+
+
 class ScriptedPolicy:
     """The hard-coded version of the decisions in SYSTEM_PROMPT."""
 
@@ -172,6 +179,8 @@ class ScriptedPolicy:
         if last and last.get("outcome") == "connector_standing" or conn.get("standing_on_end"):
             return "tip_connector", {}
         if last and last.get("outcome") == "connector_blocked":
+            return "relocate_connector", {}
+        if last and last.get("skill") == "insert_connector" and last.get("outcome") in GRASP_TROUBLE:
             return "relocate_connector", {}
         self.inserts += 1
         return "insert_connector", {}
