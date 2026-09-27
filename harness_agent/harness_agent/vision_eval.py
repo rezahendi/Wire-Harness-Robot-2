@@ -240,7 +240,8 @@ def breakdown(rows: Sequence[Dict[str, Any]], pred_key: str = "pred") -> Dict[st
         groups.setdefault(f"difficulty={r['difficulty']}", []).append(r)
         if r.get("fault"):
             groups.setdefault(f"fault={r['fault']}", []).append(r)
-    return {k: metrics(v, pred_key) for k, v in groups.items()}
+    order = ["all"] + sorted(k for k in groups if k != "all")
+    return {k: metrics(groups[k], pred_key) for k in order}
 
 
 def score_model(set_dir: str, model: str, client=None, workers: int = 4, limit: Optional[int] = None,
