@@ -22,6 +22,32 @@ wrist force/torque sensor and a parallel gripper routes a deformable wire throug
 
 ![cell](docs/media/cell.png)
 
+### Nebius x NVIDIA Global AI Hackathon: the build agent
+
+**NVIDIA Nemotron 3 Super on Nebius Token Factory supervises the robot.** It reads the harness
+spec, runs the force-controlled skills one tool call at a time, checks every result, recovers
+when something goes wrong, and cannot claim success without an inspection that shows every
+fixture seated. A camera check by a vision model on Token Factory gives a second opinion.
+
+![agent recovering from a slipped connector](docs/media/agent_recovery.jpg)
+
+* **Reliable decisions.** 885 of 885 model turns came back with exactly one well-formed tool
+  call, in 1.3 s on average (83 builds).
+* **Recovery, measured.** In the recovery benchmark (section 5) the cell injects the same
+  disturbances into the same randomised builds for Nemotron and for a hand-written rule
+  script: a wire pulled out of a fork after routing, a connector slipping out of the fingers.
+  Final run, 10 layouts x 4 scenarios: **Nemotron 40/40 builds, the rule script 37/40**. The
+  claim is parity with hand-written rules, not superiority: the script's three failures came from
+  physics that diverged after a different first call, not from a rule it lacked.
+* **Honest verdicts.** In all 80 builds of the final run, and in every build before it, the
+  planner's final claim matched the simulator's ground truth.
+* **A camera check that is measured, not assumed.** On 134 labelled renders, including botched
+  steps, the check went from 60-74% accuracy (first prompt) to 96% with 1% false alarms (Kimi K3
+  with two labelled examples, MiniCPM-V when Kimi has no answer), and it catches a tilted
+  connector that the pose check missed.
+
+![camera check at the end of a build](docs/media/agent_camera_check.jpg)
+
 The task is chosen because it is where model-based automation struggles and learning has
 a real edge: the wire's shape is uncertain, snapping it into a fork is a force event, and the
 connector insertion needs a search under contact.
@@ -380,7 +406,22 @@ point is to compare them on the same knowledge:
 | 1 | - | 9/10 | 8/10 |
 | 2 | recovery rule: grasp trouble on insert, relocate the connector, then insert again | 10/10 | 9/10 |
 | 3 | `relocate_connector` checks its own result (`still_on_holder`) instead of trusting the move; retry up to three times | 10/10 | 8/10 |
-| 4 | the grasp check knows the holder, not only the forks; re-routing a fork that lost its wire starts at attempt 0 | see the final run | see the final run |
+| 4 | the grasp check knows the holder, not only the forks; re-routing a fork that lost its wire starts at attempt 0 | 18/20 | 20/20 (final run) |
+
+**Final run**, ten randomised layouts per scenario, the code and prompt as they are now:
+
+| planner | nominal | popped wire | connector slip | both | honest verdicts | tokens per build |
+|---|---|---|---|---|---|---|
+| scripted rules | 10/10 | 9/10 | 9/10 | 9/10 | 40/40 | - |
+| Nemotron 3 Super | 10/10 | 10/10 | 10/10 | 10/10 | 40/40 | 34k-72k |
+
+The script's failures: on one layout F3 would not hold after F2 had been re-routed (three tries,
+in both disturbed scenarios), and on another a long chain of connector recoveries ran out of the
+connector budget. Nemotron met neither situation, because its builds took a different path from
+the first call on (it checks the state before starting, which settles the wire a little longer).
+So the fair reading is parity: with the same knowledge, written as a prompt instead of code, the
+model builds as reliably as the script, and in 885 turns it never produced a malformed call or
+a false success claim.
 
 Round 3 is a reminder that five builds per scenario is a small sample: the physics differs
 between the two planners from the first extra `get_status` on, so a one-build difference is
