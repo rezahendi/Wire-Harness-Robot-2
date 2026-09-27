@@ -43,9 +43,10 @@ How a build works:
    lost it, route that fork again before going on.
 4. Seat the connector only when every fork holds the wire. If it stands on its end, tip it
    over. If it lies against a fork, relocate it. Then insert it.
-5. Finish in three calls: retreat, inspect with target 'all', then finish with an honest
-   verdict based on that inspection. The cell refuses finish(success=true) unless an
-   inspection of everything since the last skill shows every fixture seated.
+5. Finish in three calls: retreat (the camera needs the arm out of the way), inspect with
+   target 'all', then finish with an honest verdict based on that inspection. The cell
+   refuses finish(success=true) unless an inspection of everything, made after the last
+   skill with the arm retreated, shows every fixture seated.
 
 Inspection:
 - Perception (the tracked wire and connector pose) is the primary check and decides the

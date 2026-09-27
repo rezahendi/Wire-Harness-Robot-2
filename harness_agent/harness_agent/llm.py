@@ -160,7 +160,9 @@ class TokenFactoryClient:
             msg = data["choices"][0]["message"]
         except (KeyError, IndexError):
             raise LLMError(f"unexpected response: {str(data)[:400]}") from None
-        return normalise_message(msg)
+        out = normalise_message(msg)
+        out["usage"] = data.get("usage") or {}
+        return out
 
 
 def normalise_message(msg: Dict[str, Any]) -> Dict[str, Any]:

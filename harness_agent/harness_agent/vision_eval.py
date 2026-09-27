@@ -4,15 +4,19 @@ Two steps, so the slow part (simulation) runs once and every model sees the same
 
     # 1. Build harnesses and photograph fixtures along the way: seated, not yet routed,
     #    and deliberately botched (wire released over the fork, wire not pressed in,
-    #    connector dropped on its holder). The simulator labels every image.
-    python -m harness_agent.vision_eval make-set --out vision_set --seeds 0-11
+    #    connector dropped on its holder). The simulator labels every image. Each
+    #    fixture is photographed in both question styles (see vision.py), and a few
+    #    labelled examples from a separate build go to refs/ for few-shot prompts.
+    python -m harness_agent.vision_eval make-set --out vision_set2 --seeds 0-11
 
     # 2. Ask one or more vision models about every image and score them.
-    python -m harness_agent.vision_eval score --set vision_set --model google/gemma-3-27b-it
+    python -m harness_agent.vision_eval score --set vision_set2 \\
+        --model openbmb/MiniCPM-V-4_5 --style v1 --style v2 --style v2refs
 
-``score`` writes one results file per model and ``report.md`` with accuracy, defect
-recall, false alarms, latency and a sheet of the images each model got wrong. The same
-images are also scored with perception (the tracked cable keypoints), as the baseline.
+``score`` writes one results file per model and style, and ``report.md`` with accuracy,
+defect recall, false alarms, latency, tokens and a sheet of the images each got wrong.
+The same images are also scored with perception (the tracked cable keypoints), as the
+baseline.
 """
 
 from __future__ import annotations
@@ -24,11 +28,20 @@ import statistics
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Dict, Generator, Iterable, List, Optional, Sequence
+from typing import Any, Dict, Generator, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 
 FAULTS = ("released_early", "not_pressed", "connector_dropped")
+SCORE_STYLES = ("v1", "v2", "v2refs")
+REF_CAPTIONS = {
+    ("fork", True): "fork seated: the orange wire runs through the gap between the two prongs, "
+                    "below the yellow knobs. Answer A yes, B yes.",
+    ("fork", False): "fork NOT seated: the gap between the prongs is empty; the wire lies on the board "
+                     "next to the fork. Answer A no, B no.",
+    ("connector", True): "connector seated: it lies flat, fully inside the green pocket. Answer A yes, B yes.",
+    ("connector", False): "connector NOT seated: it is not down in the pocket. Answer A no, B no.",
+}
 
 
 # ------------------------------------------------------------------ helpers
@@ -121,76 +134,132 @@ def _difficulty(kind: str, truth: bool, detail: Dict[str, Any]) -> str:
 
 
 # ----------------------------------------------------------------- make-set
-def make_set(out: str, spec_path: str, seeds: Sequence[int], randomize: bool = True,
-             faults: bool = True, log=print) -> List[Dict[str, Any]]:
-    from harness_core.render_util import choose_gl_backend
-    choose_gl_backend()
+def _build_and_snap(spec_path: str, seed: int, randomize: bool, faults: bool, snap_cb) -> Dict[str, Any]:
+    """One build with botched steps; calls snap_cb(session, target, stage, fault) along the way."""
     from .session import CellSession
     from .spec import HarnessSpec
 
-    spec = HarnessSpec.from_yaml(spec_path)
-    os.makedirs(os.path.join(out, "images"), exist_ok=True)
+    session = CellSession(HarnessSpec.from_yaml(spec_path), seed=seed, randomize=randomize)
+    if not session.feasible:
+        raise SystemExit(f"{spec_path} fails validation")
+    route, cid = session.route, session.connector_id
+
+    def snap(target: str, stage: str, fault: Optional[str] = None) -> None:
+        snap_cb(session, target, stage, fault)
+
+    snap(route[0], "start")
+    snap(cid, "start")
+    fault_fork = route[seed % len(route)] if faults else None
+    all_routed = True
+    for k, fid in enumerate(route):
+        if fid == fault_fork:
+            mode = FAULTS[(seed // len(route)) % 2]
+            botch_fork(session, fid, mode)
+            snap(fid, "botched", mode)
+        ok = route_with_retries(session, fid)
+        snap(fid, "routed" if ok else "route_failed")
+        if not ok:
+            all_routed = False
+            break
+        if k + 1 < len(route):
+            snap(route[k + 1], "next")
+    if all_routed:
+        if faults and seed % 2 == 0:
+            botch_connector(session)
+            snap(cid, "botched", "connector_dropped")
+        ok = insert_with_recovery(session)
+        snap(cid, "inserted" if ok else "insert_failed")
+        session.retreat()
+        for fid in route:
+            snap(fid, "final")
+    truth = session.truth()
+    session.close()
+    return truth
+
+
+def _observe_target(session, target: str) -> Tuple[str, bool, bool, Dict[str, Any]]:
+    """(kind, truth, perceived, perception detail) after parking the arm and settling."""
+    if session.perceive()["tcp_height_above_board_mm"] < 150:
+        session.retreat()                   # park the arm out of the camera's view
+    state = session.perceive(session.settled_obs(0.4))
+    truth = session.truth()
+    if target == session.connector_id:
+        return "connector", bool(truth["connector_seated"]), bool(state["connector"]["in_holder"]), \
+            state["connector"]
+    return "fork", bool(truth["forks_routed"][target]), bool(state["forks"][target]["wire_in_slot"]), \
+        state["forks"][target]
+
+
+def make_set(out: str, spec_path: str, seeds: Sequence[int], randomize: bool = True,
+             faults: bool = True, refs_seed: Optional[int] = 1000, log=print) -> List[Dict[str, Any]]:
+    from harness_core.render_util import choose_gl_backend
+    choose_gl_backend()
+
+    for sub in ("images", "images_v2"):
+        os.makedirs(os.path.join(out, sub), exist_ok=True)
     labels: List[Dict[str, Any]] = []
     for seed in seeds:
         t0 = time.perf_counter()
-        session = CellSession(spec, seed=seed, randomize=randomize)
-        if not session.feasible:
-            raise SystemExit(f"{spec_path} fails validation")
-        route, cid = session.route, session.connector_id
         rng = np.random.default_rng(10_000 + seed)
         n_before = len(labels)
 
-        def snap(target: str, stage: str, fault: Optional[str] = None) -> None:
-            if session.perceive()["tcp_height_above_board_mm"] < 150:
-                session.retreat()               # park the arm out of the camera's view
-            state = session.perceive(session.settled_obs(0.4))
-            kind, image, view = session.photograph(target, view=int(rng.integers(0, 3)))
-            truth = session.truth()
-            if kind == "fork":
-                t, p, detail = truth["forks_routed"][target], state["forks"][target]["wire_in_slot"], \
-                    state["forks"][target]
-            else:
-                t, p, detail = truth["connector_seated"], state["connector"]["in_holder"], state["connector"]
+        def snap(session, target: str, stage: str, fault: Optional[str]) -> None:
+            kind, truth, perceived, detail = _observe_target(session, target)
+            view = int(rng.integers(0, 3))
             ident = f"s{seed:03d}_{len(labels) - n_before:02d}_{target}"
-            path = os.path.join("images", ident + ".jpg")
-            image.save(os.path.join(out, path), quality=90)
-            labels.append({"id": ident, "image": path, "kind": kind, "target": target, "seed": seed,
-                           "spec": os.path.basename(spec_path), "stage": stage, "fault": fault,
-                           "view": view, "truth": bool(t), "perceived": bool(p),
-                           "difficulty": _difficulty(kind, bool(t), detail), "detail": detail})
+            paths = {}
+            for style, sub in (("v1", "images"), ("v2", "images_v2")):
+                _, image, _ = session.photograph(target, view=view, style=style)
+                paths[style] = os.path.join(sub, ident + ".jpg")
+                image.save(os.path.join(out, paths[style]), quality=90)
+            labels.append({"id": ident, "image": paths["v1"], "image_v2": paths["v2"], "kind": kind,
+                           "target": target, "seed": seed, "spec": os.path.basename(spec_path),
+                           "stage": stage, "fault": fault, "view": view, "truth": truth,
+                           "perceived": perceived, "difficulty": _difficulty(kind, truth, detail),
+                           "detail": detail})
 
-        snap(route[0], "start")
-        fault_fork = route[seed % len(route)] if faults else None
-        all_routed = True
-        for k, fid in enumerate(route):
-            if fid == fault_fork:
-                mode = FAULTS[(seed // len(route)) % 2]
-                botch_fork(session, fid, mode)
-                snap(fid, "botched", mode)
-            ok = route_with_retries(session, fid)
-            snap(fid, "routed" if ok else "route_failed")
-            if not ok:
-                all_routed = False
-                break
-            if k + 1 < len(route):
-                snap(route[k + 1], "next")
-        if all_routed:
-            if faults and seed % 2 == 0:
-                botch_connector(session)
-                snap(cid, "botched", "connector_dropped")
-            ok = insert_with_recovery(session)
-            snap(cid, "inserted" if ok else "insert_failed")
-            session.retreat()
-            for fid in route:
-                snap(fid, "final")
-        session.close()
+        final = _build_and_snap(spec_path, seed, randomize, faults, snap)
         new = labels[n_before:]
         log(f"seed {seed}: {len(new)} images ({sum(not l['truth'] for l in new)} not seated), "
-            f"success={session.truth().get('success')} in {time.perf_counter() - t0:.0f} s")
+            f"success={final.get('success')} in {time.perf_counter() - t0:.0f} s")
         with open(os.path.join(out, "labels.jsonl"), "w", encoding="utf-8") as f:
             for lab in labels:
                 f.write(json.dumps(lab) + "\n")
+    if refs_seed is not None:
+        make_refs(os.path.join(out, "refs"), spec_path, refs_seed, randomize=randomize, log=log)
     return labels
+
+
+def make_refs(ref_dir: str, spec_path: str, seed: int, randomize: bool = True, log=print) -> Dict[str, Any]:
+    """Labelled example images for few-shot prompts, from a build that is not in the set.
+
+    Picks a seated and a not-seated example of each fixture kind; for the not-seated fork
+    it prefers a wire lying close to the fork (the case models get wrong)."""
+    os.makedirs(ref_dir, exist_ok=True)
+    cands: Dict[Tuple[str, bool], List[Tuple[int, Any, Any]]] = {}
+
+    def snap(session, target: str, stage: str, fault: Optional[str]) -> None:
+        kind, truth, _, detail = _observe_target(session, target)
+        if kind == "fork" and not truth and stage != "next":
+            return                            # botched/failed states can look ambiguous
+        rank = 0 if _difficulty(kind, truth, detail) in ("hard", "seated") else 1
+        imgs = {style: session.photograph(target, view=0, style=style)[1] for style in ("v1", "v2")}
+        cands.setdefault((kind, truth), []).append((rank, imgs, stage))
+
+    _build_and_snap(spec_path, seed, randomize, True, snap)
+    spec: Dict[str, List[Dict[str, str]]] = {"v1": [], "v2": []}
+    for (kind, truth), items in sorted(cands.items(), key=lambda kv: (kv[0][0], not kv[0][1])):
+        rank, imgs, stage = sorted(items, key=lambda it: it[0])[0]
+        for style in ("v1", "v2"):
+            name = f"{kind}_{'yes' if truth else 'no'}_{style}.jpg"
+            imgs[style].save(os.path.join(ref_dir, name), quality=90)
+            spec[style].append({"kind": kind, "seated": truth, "image": name,
+                                "caption": REF_CAPTIONS[(kind, truth)], "stage": stage})
+    with open(os.path.join(ref_dir, "refs.json"), "w", encoding="utf-8") as f:
+        json.dump(spec, f, indent=1)
+    log(f"references from seed {seed}: " + ", ".join(f"{d['kind']} {'yes' if d['seated'] else 'no'}"
+                                                     for d in spec["v2"]))
+    return spec
 
 
 def read_set(set_dir: str) -> List[Dict[str, Any]]:
@@ -222,6 +291,10 @@ def metrics(rows: Sequence[Dict[str, Any]], pred_key: str = "pred") -> Dict[str,
     if secs:
         out["median_s"] = statistics.median(secs)
         out["p90_s"] = float(np.percentile(secs, 90))
+    toks = [(r.get("prompt_tokens") or 0, r.get("completion_tokens") or 0) for r in rows]
+    if any(p or c for p, c in toks):
+        out["prompt_tokens"] = float(np.mean([p for p, _ in toks]))
+        out["completion_tokens"] = float(np.mean([c for _, c in toks]))
     conf_right = [r["confidence"] for r, p, t in zip(rows, pred, truth) if p is not None and p == t
                   and r.get("confidence") is not None]
     conf_wrong = [r["confidence"] for r, p, t in zip(rows, pred, truth) if p is not None and p != t
@@ -244,20 +317,25 @@ def breakdown(rows: Sequence[Dict[str, Any]], pred_key: str = "pred") -> Dict[st
     return {k: metrics(groups[k], pred_key) for k in order}
 
 
-def score_model(set_dir: str, model: str, client=None, workers: int = 4, limit: Optional[int] = None,
-                log=print) -> List[Dict[str, Any]]:
+def score_model(set_dir: str, model: str, client=None, style: str = "v2", workers: int = 4,
+                limit: Optional[int] = None, log=print) -> List[Dict[str, Any]]:
     from PIL import Image
 
-    from .vision import VisualInspector
+    from .vision import VisualInspector, load_references
 
     labels = read_set(set_dir)[:limit] if limit else read_set(set_dir)
-    inspector = VisualInspector(client=client, model=model)
+    base_style = "v1" if style == "v1" else "v2"
+    refs = load_references(os.path.join(set_dir, "refs"), base_style) if style.endswith("refs") else None
+    inspector = VisualInspector(client=client, model=model, style=base_style, references=refs)
 
     def one(lab: Dict[str, Any]) -> Dict[str, Any]:
-        with Image.open(os.path.join(set_dir, lab["image"])) as im:
+        path = lab["image"] if base_style == "v1" else lab.get("image_v2", lab["image"])
+        with Image.open(os.path.join(set_dir, path)) as im:
             v = inspector.ask(lab["kind"], lab["target"], im.convert("RGB"), view=lab["view"])
-        return {**lab, "model": model, "pred": v.seated, "confidence": v.confidence,
-                "evidence": v.evidence, "seconds": round(v.seconds, 2), "error": v.error, "raw": v.raw}
+        return {**lab, "model": model, "style": style, "scored_image": path, "pred": v.seated,
+                "confidence": v.confidence, "evidence": v.evidence, "per_view": v.per_view,
+                "seconds": round(v.seconds, 2), "error": v.error, "raw": v.raw,
+                "prompt_tokens": v.prompt_tokens, "completion_tokens": v.completion_tokens}
 
     rows: List[Dict[str, Any]] = []
     with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
@@ -266,12 +344,23 @@ def score_model(set_dir: str, model: str, client=None, workers: int = 4, limit: 
             mark = "ok " if row["pred"] is not None and row["pred"] == row["truth"] else (
                 "?? " if row["pred"] is None else "XX ")
             log(f"  [{k:3d}/{len(labels)}] {mark}{row['id']:24s} truth={'seated' if row['truth'] else 'NOT'}"
-                f"  model={row['pred']} ({row['confidence']:.2f}, {row['seconds']:.1f} s)"
-                + (f"  {row['error']}" if row["error"] else ""))
-    with open(os.path.join(set_dir, f"results_{model_slug(model)}.jsonl"), "w", encoding="utf-8") as f:
+                f"  model={row['pred']} ({row['seconds']:.1f} s)" + (f"  {row['error']}" if row["error"] else ""))
+    with open(os.path.join(set_dir, f"results_{model_slug(model)}__{style}.jsonl"), "w", encoding="utf-8") as f:
         for row in rows:
             f.write(json.dumps(row) + "\n")
     return rows
+
+
+def load_results(set_dir: str) -> Dict[Tuple[str, str], List[Dict[str, Any]]]:
+    """Every results file in the set, keyed by (model, style)."""
+    out: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+    for name in sorted(os.listdir(set_dir)):
+        if name.startswith("results_") and name.endswith(".jsonl"):
+            with open(os.path.join(set_dir, name), encoding="utf-8") as f:
+                rows = [json.loads(line) for line in f if line.strip()]
+            if rows:
+                out[(rows[0]["model"], rows[0].get("style", "v1"))] = rows
+    return out
 
 
 def error_sheet(set_dir: str, rows: Sequence[Dict[str, Any]], path: str, max_items: int = 12) -> Optional[str]:
@@ -286,14 +375,17 @@ def error_sheet(set_dir: str, rows: Sequence[Dict[str, Any]], path: str, max_ite
     w = 640
     tiles = []
     for r in wrong:
-        with Image.open(os.path.join(set_dir, r["image"])) as im:
+        with Image.open(os.path.join(set_dir, r.get("scored_image") or r["image"])) as im:
             im = im.convert("RGB")
             im = im.resize((w, round(im.height * w / im.width)))
         cap = Image.new("RGB", (w, 44), (255, 255, 255))
         d = ImageDraw.Draw(cap)
         said = "no answer" if r["pred"] is None else ("seated" if r["pred"] else "not seated")
-        d.text((6, 3), f"{r['id']}  truth: {'seated' if r['truth'] else 'NOT seated'}  model: {said} "
-                       f"({r.get('confidence', 0):.2f})", fill=(160, 20, 20), font=_font(14))
+        views = r.get("per_view") or {}
+        vtxt = ("  views " + " ".join(f"{k}:{'yes' if v else 'no' if v is False else '?'}" for k, v in views.items())
+                if views else "")
+        d.text((6, 3), f"{r['id']}  truth: {'seated' if r['truth'] else 'NOT seated'}  model: {said}{vtxt}",
+               fill=(160, 20, 20), font=_font(14))
         d.text((6, 23), (r.get("evidence") or r.get("error") or "")[:95], fill=(40, 40, 40), font=_font(13))
         tile = Image.new("RGB", (w, im.height + 44), (255, 255, 255))
         tile.paste(im, (0, 0))
@@ -313,7 +405,8 @@ def _pct(v: Optional[float]) -> str:
     return "n/a" if v is None else f"{100 * v:.0f}%"
 
 
-def write_report(set_dir: str, results: Dict[str, List[Dict[str, Any]]], usage: Dict[str, Any]) -> str:
+def write_report(set_dir: str, results: Dict[Any, List[Dict[str, Any]]], usage: Optional[Dict[str, Any]] = None) -> str:
+    """report.md for the set. ``results`` is keyed by (model, style) or by model."""
     labels = read_set(set_dir)
     n_def = sum(not l["truth"] for l in labels)
     lines = ["# Visual inspection accuracy", "",
@@ -322,41 +415,40 @@ def write_report(set_dir: str, results: Dict[str, List[Dict[str, Any]]], usage: 
              f"{sum(bool(l.get('fault')) for l in labels)} from deliberately botched steps). "
              "Labels are simulator ground truth. A *defect* is a fixture that is not seated; "
              "*defect recall* is the share of defects the check catches, *false alarms* the "
-             "share of good fixtures it rejects. An unusable answer counts as wrong.", "",
-             "| check | accuracy | defect recall | false alarms | hard defects caught | unusable | "
-             "median latency |", "|---|---|---|---|---|---|---|"]
+             "share of good fixtures it rejects. An unusable answer counts as wrong. "
+             "Styles: v1 general views and one yes/no question; v2 views through the slot, the "
+             "fixture boxed, one question per view; v2refs the same with two labelled examples.", "",
+             "| check | style | accuracy | defect recall | false alarms | hard defects caught | unusable | "
+             "median latency | tokens in/out |", "|---|---|---|---|---|---|---|---|---|"]
     base = breakdown(labels, "perceived")
-    lines.append(f"| perception (cable keypoints) | {_pct(base['all']['accuracy'])} | "
+    lines.append(f"| perception (cable keypoints) | - | {_pct(base['all']['accuracy'])} | "
                  f"{_pct(base['all']['defect_recall'])} | {_pct(base['all']['false_alarm_rate'])} | "
-                 f"{_pct(base.get('difficulty=hard', {}).get('defect_recall'))} | 0% | - |")
-    for model, rows in results.items():
+                 f"{_pct(base.get('difficulty=hard', {}).get('defect_recall'))} | 0% | - | - |")
+    keyed = {(k if isinstance(k, tuple) else (k, rows[0].get("style", "v1") if rows else "v1")): rows
+             for k, rows in results.items()}
+    for (model, style), rows in keyed.items():
         b = breakdown(rows)
         a = b["all"]
-        lines.append(f"| `{model}` | {_pct(a['accuracy'])} | {_pct(a['defect_recall'])} | "
+        tok = (f"{a['prompt_tokens']:.0f} / {a['completion_tokens']:.0f}" if "prompt_tokens" in a else "-")
+        lines.append(f"| `{model}` | {style} | {_pct(a['accuracy'])} | {_pct(a['defect_recall'])} | "
                      f"{_pct(a['false_alarm_rate'])} | {_pct(b.get('difficulty=hard', {}).get('defect_recall'))} | "
-                     f"{_pct(a['unusable'])} | {a.get('median_s', 0):.1f} s |")
+                     f"{_pct(a['unusable'])} | {a.get('median_s', 0):.1f} s | {tok} |")
     lines.append("")
-    for model, rows in results.items():
+    for (model, style), rows in keyed.items():
         b = breakdown(rows)
-        lines += [f"## `{model}`", "", "| subset | n | accuracy | defect recall | false alarms |",
+        lines += [f"## `{model}`, {style}", "", "| subset | n | accuracy | defect recall | false alarms |",
                   "|---|---|---|---|---|"]
         for k, m in b.items():
             lines.append(f"| {k} | {m['n']} | {_pct(m['accuracy'])} | {_pct(m.get('defect_recall'))} | "
                          f"{_pct(m.get('false_alarm_rate'))} |")
         a = b["all"]
-        u = (usage.get("per_model") or {}).get(model)
-        extra = []
         if "confidence_when_right" in a:
-            extra.append(f"mean confidence {a['confidence_when_right']:.2f} when right"
-                         + (f", {a['confidence_when_wrong']:.2f} when wrong" if "confidence_when_wrong" in a else ""))
-        if u and u.get("calls"):
-            extra.append(f"{u['prompt_tokens'] / u['calls']:.0f} prompt + {u['completion_tokens'] / u['calls']:.0f} "
-                         f"completion tokens per image")
-        if extra:
-            lines += ["", "; ".join(extra) + "."]
-        sheet = error_sheet(set_dir, rows, os.path.join(set_dir, f"errors_{model_slug(model)}.jpg"))
+            lines += ["", f"Mean confidence {a['confidence_when_right']:.2f} when right"
+                      + (f", {a['confidence_when_wrong']:.2f} when wrong" if "confidence_when_wrong" in a else "")
+                      + "."]
+        sheet = error_sheet(set_dir, rows, os.path.join(set_dir, f"errors_{model_slug(model)}__{style}.jpg"))
         if sheet:
-            lines += ["", f"![images {model} got wrong]({os.path.basename(sheet)})"]
+            lines += ["", f"![images {model} ({style}) got wrong]({os.path.basename(sheet)})"]
         lines.append("")
     path = os.path.join(set_dir, "report.md")
     with open(path, "w", encoding="utf-8") as f:
@@ -372,12 +464,16 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     mk.add_argument("--out", default="vision_set")
     mk.add_argument("--spec", default=None, help="harness spec (default: the packaged demo_3fork.yaml)")
     mk.add_argument("--seeds", default="0-11", help="e.g. 0-11 or 0,3,5")
+    mk.add_argument("--refs-seed", type=int, default=1000, help="build that supplies the few-shot examples "
+                                                                  "(-1: none)")
     mk.add_argument("--no-randomize", action="store_true", help="nominal layout for every seed")
     mk.add_argument("--no-faults", action="store_true", help="do not botch any steps")
     sc = sub.add_parser("score", help="ask vision models about every image and score them")
     sc.add_argument("--set", dest="set_dir", default="vision_set")
     sc.add_argument("--model", action="append", default=None,
                     help="Token Factory model id; repeat to compare models (default: the picked vision model)")
+    sc.add_argument("--style", action="append", default=None, choices=SCORE_STYLES,
+                    help="question style; repeat to compare (default: v2)")
     sc.add_argument("--workers", type=int, default=4, help="parallel requests")
     sc.add_argument("--limit", type=int, default=None, help="only the first N images (a quick look)")
     rp = sub.add_parser("report", help="rewrite report.md from the results files already in the set")
@@ -391,32 +487,25 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             from ament_index_python.packages import get_package_share_directory
             spec = os.path.join(get_package_share_directory("harness_agent"), "specs", "demo_3fork.yaml")
         labels = make_set(args.out, spec, parse_seeds(args.seeds), randomize=not args.no_randomize,
-                          faults=not args.no_faults)
+                          faults=not args.no_faults, refs_seed=None if args.refs_seed < 0 else args.refs_seed)
         n_def = sum(not l["truth"] for l in labels)
         print(f"\n{len(labels)} images ({n_def} not seated) in {args.out}/")
         return 0
 
-    results: Dict[str, List[Dict[str, Any]]] = {}
-    usage: Dict[str, Any] = {}
     if args.cmd == "score":
         from .llm import TokenFactoryClient
         client = TokenFactoryClient(max_retries=6)          # rides out rate limits on long runs
         models = args.model or [client.vision_model()]
+        styles = args.style or ["v2"]
         for model in models:
-            print(f"\n{model}:")
-            rows = score_model(args.set_dir, model, client=client, workers=args.workers, limit=args.limit)
-            results[model] = rows
-            a = metrics(rows)
-            print(f"  accuracy {_pct(a['accuracy'])}, defect recall {_pct(a['defect_recall'])}, "
-                  f"false alarms {_pct(a['false_alarm_rate'])}, unusable {_pct(a['unusable'])}")
-        usage = client.usage.as_dict()
-    for name in sorted(os.listdir(args.set_dir)):          # earlier runs of other models, for comparison
-        if name.startswith("results_") and name.endswith(".jsonl"):
-            with open(os.path.join(args.set_dir, name), encoding="utf-8") as f:
-                rows = [json.loads(line) for line in f if line.strip()]
-            if rows and rows[0]["model"] not in results:
-                results[rows[0]["model"]] = rows
-    path = write_report(args.set_dir, results, usage)
+            for style in styles:
+                print(f"\n{model}, style {style}:")
+                rows = score_model(args.set_dir, model, client=client, style=style, workers=args.workers,
+                                   limit=args.limit)
+                a = metrics(rows)
+                print(f"  accuracy {_pct(a['accuracy'])}, defect recall {_pct(a['defect_recall'])}, "
+                      f"false alarms {_pct(a['false_alarm_rate'])}, unusable {_pct(a['unusable'])}")
+    path = write_report(args.set_dir, load_results(args.set_dir))
     print(f"\nreport: {path}")
     return 0
 

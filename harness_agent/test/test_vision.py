@@ -11,9 +11,10 @@ from harness_agent.llm import LLMError
 from harness_agent.session import CellSession
 from harness_agent.spec import HarnessSpec
 from harness_agent.tools import ToolBox
-from harness_agent.vision import (FakeVisionClient, VisualInspector, compose, parse_verdict,
-                                  to_data_url)
-from harness_agent.vision_eval import breakdown, metrics, model_slug, parse_seeds, write_report
+from harness_agent.vision import (FakeVisionClient, VisualInspector, camera_basis, compose,
+                                  fixture_corners, parse_verdict, parse_views, project, to_data_url)
+from harness_agent.vision_eval import (breakdown, load_results, metrics, model_slug, parse_seeds,
+                                       write_report)
 
 SPECS = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "specs")
 
@@ -49,12 +50,41 @@ def test_verdicts_are_parsed_from_imperfect_replies(text, seated, conf):
     assert c == pytest.approx(conf)
 
 
+@pytest.mark.parametrize("text,seated,conf,views", [
+    ('{"A": "yes", "B": "yes", "evidence": "wire in the gap"}', True, 1.0, {"A": True, "B": True}),
+    ('{"A": "no", "B": "no"}', False, 1.0, {"A": False, "B": False}),
+    ('{"view_A": "yes", "view_B": "no"}', False, 0.5, {"A": True, "B": False}),   # views disagree: not seated
+    ('{"A": "Yes."}', True, 0.5, {"A": True}),
+    ('{"seated": false, "confidence": 0.8}', False, 0.8, {}),                     # a v1-style answer
+    ('no idea', None, 0.0, {}),
+])
+def test_per_view_answers_are_combined_conservatively(text, seated, conf, views):
+    got, c, _, v = parse_views(text)
+    assert got is seated and c == pytest.approx(conf) and v == views
+
+
+def test_projection_matches_the_free_camera_convention():
+    lookat = np.array([0.5, 0.0, 0.05])
+    for az, el in ((0.0, -10.0), (135.0, -45.0), (270.0, -88.0)):
+        fwd, right, up = camera_basis(az, el)
+        assert np.dot(fwd, right) == pytest.approx(0.0, abs=1e-12) and up[2] > 0.0
+        uv = project(lookat, lookat, az, el, 0.15, 45.0, 512, 384)[0]
+        assert uv == pytest.approx([256.0, 192.0])              # the look-at point is the image centre
+        above = project(lookat + [0, 0, 0.01], lookat, az, el, 0.15, 45.0, 512, 384)[0]
+        assert above[1] < 192.0                                  # higher in the world, higher in the image
+    corners = fixture_corners("fork", (0.5, 0.0, 0.02, 0.3))
+    assert corners.shape == (8, 3) and corners[:, 2].min() == pytest.approx(0.02)
+
+
 def test_views_are_composed_and_encoded():
     a = np.zeros((384, 512, 3), np.uint8)
     b = np.full((192, 256, 3), 200, np.uint8)              # rescaled to the common width
     im = compose([("along the slot", a), ("oblique", b)], "Fork F2")
     assert im.size == (2 * 512 + 6, 384 + 30)
     assert to_data_url(im).startswith("data:image/jpeg;base64,")
+    boxed = np.asarray(compose([("A", a, (100, 100, 200, 200)), ("B", b, None)], "Fork F2"))
+    assert tuple(boxed[30 + 150, 100]) == (255, 0, 255)          # the highlight box is drawn in view A
+    assert (boxed[30:, 518:] == (255, 0, 255)).all(axis=-1).sum() == 0
 
 
 def test_inspector_reports_unusable_answers_and_failed_calls():
@@ -73,6 +103,11 @@ def test_inspector_reports_unusable_answers_and_failed_calls():
     assert "fork F3" in stub.calls[0]["prompt"] and "orange" in stub.calls[0]["prompt"]
     with pytest.raises(ValueError):
         VisualInspector(stub).ask("clamp", "CL1", img)
+    refs = {"fork": [(img, "fork seated"), (img, "fork NOT seated")]}
+    fs = FakeVisionClient()
+    v = VisualInspector(fs, references=refs).ask("fork", "F1", img)
+    assert fs.calls[0]["images"] == 3 and v.seated is True and v.style == "v2refs"
+    assert v.prompt_tokens == 100
 
 
 def test_finish_needs_a_fresh_inspection_showing_everything_seated():
@@ -86,6 +121,16 @@ def test_finish_needs_a_fresh_inspection_showing_everything_seated():
     assert box.last_inspection is None
     assert box.call("finish", {"success": False, "report": "nothing built"})["recorded"]["success"] is False
     assert box.refused_verdicts == 2
+
+
+def test_success_verdict_needs_the_arm_out_of_the_camera_view():
+    box = ToolBox(CellSession(spec("demo_3fork"), seed=0))
+    seated = {"forks": {f: {"wire_in_slot": True} for f in ("F1", "F2", "F3")},
+              "connector": {"in_holder": True}}
+    box.last_inspection = {**seated, "arm_clear": False}
+    assert "retreat" in box.call("finish", {"success": True, "report": "ok"})["error"]
+    box.last_inspection = {**seated, "arm_clear": True}
+    assert box.call("finish", {"success": True, "report": "ok"})["recorded"]["success"] is True
 
 
 @needs_gl
@@ -142,6 +187,9 @@ def test_report_compares_models_with_the_perception_baseline(tmp_path):
     results = {"m/one": [{**lab, "model": "m/one", "pred": True, "confidence": 0.8, "evidence": "looks seated",
                           "seconds": 0.5, "error": ""} for lab in labels]}
     text = open(write_report(str(tmp_path), results, {})).read()
-    assert "| perception (cable keypoints) | 100% | 100% | 0% |" in text
-    assert "| `m/one` | 33% | 0% | 0% |" in text
-    assert (tmp_path / "errors_m__one.jpg").exists()
+    assert "| perception (cable keypoints) | - | 100% | 100% | 0% |" in text
+    assert "| `m/one` | v1 | 33% | 0% | 0% |" in text
+    assert (tmp_path / "errors_m__one__v1.jpg").exists()
+    with open(tmp_path / "results_m__one__v2.jsonl", "w") as f:
+        f.writelines(json.dumps({**r, "style": "v2"}) + "\n" for r in results["m/one"])
+    assert set(load_results(str(tmp_path))) == {("m/one", "v2")}

@@ -272,38 +272,46 @@ truth), with `--vision` the inspection photos in `inspection/`, and optionally `
 `runs/<spec>_<planner>_<seed>/`.
 
 **No success without evidence.** `finish(success=true)` is refused unless an `inspect` of
-everything, made after the last physical skill, shows every fixture seated. The first live
-run showed why: Nemotron wrote "retreat, then inspect all, then finish" in its reasoning and
-then went straight to `finish`. The verdict happened to be right; now it has to be earned.
+everything, made after the last physical skill and with the arm retreated out of the camera's
+view, shows every fixture seated. The first live run showed why: Nemotron wrote "retreat, then
+inspect all, then finish" in its reasoning and then went straight to `finish`. The verdict
+happened to be right; now it has to be earned.
 
 **Camera check (`--vision`).** `inspect` also photographs each fixture from two angles with a
-virtual inspection camera and asks a vision-language model on Token Factory one narrow question
-("is the wire seated in fork F2?", answered as JSON with a confidence and a sentence of
-evidence). Perception stays the primary check; when the two disagree the agent looks again from
-new angles and flags the fixture for a manual check if they still disagree. None of the NVIDIA
-models on Token Factory take images today, so the vision model is one of the open VLMs there
-(`check_nebius --vision-all` found MiniCPM-V 4.5, Gemma 3 27B and Kimi K3); Nemotron stays the
-planner.
+virtual inspection camera and asks a vision-language model on Token Factory about it. Perception
+stays the primary check; when the two disagree the agent looks again from new angles and flags the
+fixture for a manual check if they still disagree. None of the NVIDIA models on Token Factory take
+images today, so the vision model is one of the open VLMs there (`check_nebius --vision-all` found
+MiniCPM-V 4.5, Gemma 3 27B and Kimi K3); Nemotron stays the planner.
 
 How far to trust the camera check is measured, not assumed. `vision_eval` builds harnesses in
 simulation, photographs the fixtures along the way, including deliberately botched steps (wire
 released over the fork, wire resting on the lips instead of pressed in, connector dropped on its
-holder), labels every image with simulator ground truth, and scores any number of models on the
-same images, with perception as the baseline:
+holder), labels every image with simulator ground truth, and scores any number of models and
+question styles on the same images, with perception as the baseline:
 
 ```bash
-ros2 run harness_agent vision_eval make-set --out vision_set --seeds 0-11     # simulation only
-ros2 run harness_agent vision_eval score --set vision_set \
-    --model openbmb/MiniCPM-V-4_5 --model google/gemma-3-27b-it --model moonshotai/Kimi-K3
+ros2 run harness_agent vision_eval make-set --out vision_set2 --seeds 0-11    # simulation only
+ros2 run harness_agent vision_eval score --set vision_set2 \
+    --model openbmb/MiniCPM-V-4_5 --model google/gemma-3-27b-it --style v1 --style v2 --style v2refs
 ```
 
-`score` writes `vision_set/report.md`: accuracy, defect recall (not-seated fixtures caught),
-false alarms (good fixtures rejected), results on the hard cases and per fault, latency, tokens
-per image, and a sheet of the images each model got wrong.
+`score` writes `report.md`: accuracy, defect recall (not-seated fixtures caught), false alarms
+(good fixtures rejected), results on the hard cases and per fault, latency, tokens per image, and a
+sheet of the images each model got wrong.
 
-The three planners go through the same tools, so their builds compare directly: `nemotron`
-(the model decides), `scripted` (the same rules hard-coded) and `expert` (the original
-monolithic expert with its built-in recoveries).
+The first round (style v1: two general views, "is the wire seated in this fork?") was sobering.
+On 130 images, MiniCPM-V 4.5 reached 76% accuracy but caught only 48% of the defects, Gemma 3 27B
+called nearly everything seated (6% of defects caught), and Kimi K3 answered only 28 images
+before running out of its reasoning budget, but got all 28 right. The small models repeated the
+definition of "seated" back as their evidence, and the views were ambiguous: a wire lying on the
+board behind a fork looks as if it runs through the slot. Style v2 is the fix: both views look
+straight *through* the slot from opposite sides (a seated wire shows as orange inside the gap;
+otherwise the gap is empty), the fixture to check is boxed in magenta, and the model answers one
+local question per view ("is there orange wire in the gap between the prongs?"). The code, not the
+model, combines them: seated only if both views say yes. `v2refs` adds two labelled example images
+to the prompt. `run_build --vision-style v2 --vision-refs vision_set2/refs` uses the same setup in
+a live build.
 
 **Harness specs** are YAML in board millimetres, as on a drawing:
 

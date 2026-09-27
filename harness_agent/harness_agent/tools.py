@@ -66,8 +66,9 @@ class ToolBox:
     """Dispatches tool calls to a CellSession, with budgets and argument checks.
 
     It also holds the model to evidence: ``finish(success=true)`` is refused unless an
-    inspection of everything, made after the last physical skill, shows every fixture
-    seated. A planner cannot talk its way to a success verdict.
+    inspection of everything, made after the last physical skill with the arm parked
+    clear of the board, shows every fixture seated. A planner cannot talk its way to a
+    success verdict.
     """
 
     def __init__(self, session: CellSession, max_fork_calls: int = 12, max_connector_calls: int = 8):
@@ -162,6 +163,9 @@ class ToolBox:
         if insp is None:
             return ("a success verdict needs evidence: call inspect with target 'all' after the last "
                     "skill, then finish")
+        if insp.get("arm_clear") is False:
+            return ("the arm was over the board during the inspection, so the check is not valid: "
+                    "retreat, inspect with target 'all' again, then finish")
         bad = [f for f, v in (insp.get("forks") or {}).items() if not v.get("wire_in_slot")]
         if not (insp.get("connector") or {}).get("in_holder"):
             bad.append(self.session.connector_id)

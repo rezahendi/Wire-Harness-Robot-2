@@ -122,6 +122,9 @@ def main(argv: Optional[list] = None) -> int:
     ap.add_argument("--vision", action="store_true",
                     help="camera check: a Token Factory vision model inspects each fixture too")
     ap.add_argument("--vision-model", default=None, help="vision model id (default: picked automatically)")
+    ap.add_argument("--vision-style", default="v2", choices=("v1", "v2"), help="camera views and question style")
+    ap.add_argument("--vision-refs", default=None,
+                    help="folder with labelled example images (refs/ of a vision_eval set) for few-shot prompts")
     ap.add_argument("--out", default=None, help="output directory (default: runs/<spec>_<planner>_<seed>)")
     args = ap.parse_args(argv)
     if args.video or args.vision:
@@ -143,8 +146,10 @@ def main(argv: Optional[list] = None) -> int:
         from .llm import TokenFactoryClient
         client = TokenFactoryClient()
     if args.vision:
-        from .vision import VisualInspector
-        inspector = VisualInspector(client=client, model=args.vision_model)
+        from .vision import VisualInspector, load_references
+        refs = load_references(args.vision_refs, args.vision_style) if args.vision_refs else None
+        inspector = VisualInspector(client=client, model=args.vision_model, style=args.vision_style,
+                                    references=refs)
     session = CellSession(spec, seed=args.seed, randomize=args.randomize, render=args.video,
                           frame_every=0.25, inspector=inspector,
                           inspection_dir=os.path.join(out, "inspection") if inspector else None)
@@ -153,7 +158,7 @@ def main(argv: Optional[list] = None) -> int:
     for i in session.issues:
         print(f"  {i.severity}: {i.message}")
     if inspector is not None:
-        print(f"  camera check: {inspector.model}")
+        print(f"  camera check: {inspector.model} (style {inspector.label})")
 
     if args.planner == "expert":
         if not session.feasible:

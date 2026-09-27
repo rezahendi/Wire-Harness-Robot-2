@@ -388,7 +388,8 @@ class CellSession:
             return {"feasible": False}
         state = self.status()
         self._last_status = state
-        out: Dict[str, Any] = {"target": target, "sim_time_s": state["sim_time_s"], "method": "perception"}
+        out: Dict[str, Any] = {"target": target, "sim_time_s": state["sim_time_s"], "method": "perception",
+                               "arm_clear": state["tcp_height_above_board_mm"] >= 150}
         if target in ("all", "board"):
             out["forks"] = state["forks"]
             out["connector"] = state["connector"]
@@ -424,18 +425,22 @@ class CellSession:
             self._camera = InspectionCamera(self.env.cell.sim)
         return self._camera
 
-    def photograph(self, target: str, view: Optional[int] = None):
-        """Composite image of a fork or the connector holder: (kind, image, view index)."""
-        from .vision import compose
+    def photograph(self, target: str, view: Optional[int] = None, style: Optional[str] = None):
+        """Composite image of a fork or the connector holder: (kind, image, view index).
+
+        ``style`` picks the camera views (see vision.VIEWS); default: the inspector's."""
+        from .vision import DEFAULT_STYLE, compose
+        style = style or getattr(self.inspector, "style", None) or DEFAULT_STYLE
         if view is None:
             view = self._looks.get(target, 0)
             self._looks[target] = view + 1
         obs = self.obs
         if target == self.connector_id or target == "connector":
-            views = self.camera().holder_views(obs["holder_pos"], float(obs["holder_yaw"][0]), view)
+            pose = (*[float(v) for v in obs["holder_pos"]], float(obs["holder_yaw"][0]))
+            views = self.camera().views("connector", pose, self.cfg, view, style)
             return "connector", compose(views, f"Holder for connector {self.connector_id}"), view
         i = self.route.index(target)
-        views = self.camera().fork_views(obs["forks"][i], self.cfg.fork, view)
+        views = self.camera().views("fork", obs["forks"][i], self.cfg, view, style)
         return "fork", compose(views, f"Fork {target}"), view
 
     def look(self, target: str):
