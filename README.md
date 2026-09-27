@@ -70,6 +70,17 @@ ros2 launch harness_description display.launch.py          # only the robot mode
 Keep the workspace inside the Linux file system (`~/...`), not under `/mnt/c`: builds and
 Python imports are much faster there.
 
+If you keep the checkout on the Windows side (say on the Desktop, to edit it with Windows
+tools), build it through a link instead of copying it:
+
+```bash
+bash "/mnt/c/Users/<you>/Desktop/<folder>/wire_harness_robot/scripts/wsl_link_workspace.sh"
+source ~/harness_ws/install/setup.bash
+```
+
+`~/harness_ws` then holds only a symlink to the checkout plus the build output, and edits to
+Python files take effect without rebuilding.
+
 ---
 
 ## 2. What the robot does

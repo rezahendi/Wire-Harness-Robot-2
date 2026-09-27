@@ -19,7 +19,7 @@ fi
 echo "==> apt packages (ROS tools used by the cell, OpenGL for the MuJoCo viewer / videos)"
 sudo apt-get update
 sudo apt-get install -y \
-  python3-pip python3-numpy python3-yaml python3-pytest \
+  python3-pip python3-numpy python3-yaml python3-pytest python3-matplotlib \
   python3-colcon-common-extensions python3-rosdep \
   ros-jazzy-xacro ros-jazzy-robot-state-publisher ros-jazzy-joint-state-publisher-gui \
   ros-jazzy-rviz2 ros-jazzy-control-msgs ros-jazzy-tf2-ros-py ros-jazzy-launch-ros \
