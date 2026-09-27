@@ -13,6 +13,7 @@ HARNESS_VISION_MODEL / HARNESS_FAST_MODEL).
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import re
@@ -27,7 +28,7 @@ DEFAULT_BASE_URL = "https://api.tokenfactory.nebius.com/v1/"
 # substrings in order of preference (matched case-insensitively against model ids)
 PLANNER_PREFERENCE = ("nemotron-3-super", "nemotron-3-ultra", "nemotron-3_5", "nemotron-3-nano-30b",
                       "nemotron")
-VISION_PREFERENCE = ("nemotron-3-nano-omni", "nano-omni", "omni", "nemotron-nano-2-vl", "-vl")
+VISION_PREFERENCE = ("nemotron-3-nano-omni", "nano-omni", "omni", "nemotron-nano-2-vl", "minicpm-v", "gemma-3", "-vl")
 FAST_PREFERENCE = ("nemotron-3-nano-30b", "nemotron-3-nano", "lightning", "nemotron")
 
 
@@ -88,7 +89,11 @@ class TokenFactoryClient:
             req = urllib.request.Request(url, data=data, headers=headers, method=method)
             try:
                 with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                    return json.loads(resp.read().decode("utf-8"))
+                    raw = resp.read().decode("utf-8", "replace")
+                try:
+                    return json.loads(raw)
+                except json.JSONDecodeError:
+                    raise LLMError(f"non-JSON answer from {url}: {raw[:300]}") from None
             except urllib.error.HTTPError as e:
                 detail = e.read().decode("utf-8", "replace")[:500]
                 if e.code in (429, 500, 502, 503, 504) and attempt < self.max_retries:
@@ -96,12 +101,14 @@ class TokenFactoryClient:
                     delay *= 2.0
                     continue
                 raise LLMError(f"HTTP {e.code} from {url}: {detail}") from None
-            except urllib.error.URLError as e:
+            except (urllib.error.URLError, OSError, http.client.HTTPException) as e:
+                # URLError: DNS/connect; OSError: read timeouts and resets; HTTPException:
+                # truncated responses. All transient, so retry with backoff.
                 if attempt < self.max_retries:
                     time.sleep(delay)
                     delay *= 2.0
                     continue
-                raise LLMError(f"cannot reach {url}: {e.reason}") from None
+                raise LLMError(f"cannot reach {url}: {getattr(e, 'reason', None) or e!r}") from None
         raise LLMError("unreachable")
 
     # ----------------------------------------------------------- models
