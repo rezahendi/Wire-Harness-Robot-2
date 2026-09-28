@@ -63,10 +63,12 @@ class SkillResult:
     perceived: Dict[str, Any] = field(default_factory=dict)   # shown to the planner
     truth: Dict[str, Any] = field(default_factory=dict)       # hidden, for scoring
     wall_time: float = 0.0
+    controller: str = "expert"           # who ran the step: the force-guided expert or a learned policy
 
     def for_planner(self) -> Dict[str, Any]:
         """What the planner is told: no ground truth."""
         return {"skill": self.skill, "args": self.args, "ok": self.ok, "outcome": self.outcome,
+                **({"executed_by": self.controller} if self.controller != "expert" else {}),
                 "duration_s": round(self.sim_time_end - self.sim_time_start, 1),
                 "max_contact_force_N": round(self.max_force, 1),
                 "messages": self.messages[-8:], "state": self.perceived}
@@ -110,6 +112,8 @@ class CellSession:
         self._camera = None
         self._looks: Dict[str, int] = {}     # inspections per target (each one uses a new view)
         self._last_status: Optional[Dict[str, Any]] = None
+        self.step_hook: Optional[Callable[[np.ndarray], None]] = None   # called before each skill step
+        self.skill_runners: Dict[str, Any] = {}   # skill name -> learned policy runner (e.g. GR00T)
         if self.feasible:
             self.env = HarnessRoutingEnv(cfg=self.cfg, randomize=randomize,
                                          max_episode_time=max_sim_time + 60.0,
@@ -157,6 +161,8 @@ class CellSession:
         try:
             action = next(gen)
             while True:
+                if self.step_hook is not None:       # e.g. the GR00T demo recorder
+                    self.step_hook(action)
                 _, _, _, _, info = env.step(action)
                 ex._last_obs = self.obs
                 max_f = max(max_f, float(info["contact_force"]))
@@ -204,12 +210,12 @@ class CellSession:
         return out
 
     def _result(self, skill: str, args: Dict[str, Any], ok: bool, outcome: str,
-                run: Dict[str, Any], wall: float) -> SkillResult:
+                run: Dict[str, Any], wall: float, controller: str = "expert") -> SkillResult:
         perceived = self.perceive(self.settled_obs(0.3))
         res = SkillResult(skill=skill, args=args, ok=ok, outcome=outcome,
                           messages=run.get("messages", []), sim_time_start=run.get("t0", self.sim_time),
                           sim_time_end=self.sim_time, max_force=run.get("max_force", 0.0),
-                          perceived=perceived, truth=self.truth(), wall_time=wall)
+                          perceived=perceived, truth=self.truth(), wall_time=wall, controller=controller)
         self._emit({"type": "skill", **res.as_dict()})
         return res
 
@@ -338,6 +344,20 @@ class CellSession:
                                 f"at the previous fork, so those must hold it first")
         t_wall = time.perf_counter()
         self.expert.current_fork = i
+        runner = self.skill_runners.get("route_fork")
+        if runner is not None and runner.wants("route_fork", fork_id, int(attempt)):
+            # a learned policy (GR00T) does this step instead of the expert
+            self.expert.phase = "learned_policy"
+            run = self._drive(runner.route_fork(self, i), budget=runner.max_seconds)
+            self.expert.phase = "done"
+            ok = bool(run["value"]) and run["reason"] == "done"
+            outcome = "routed" if ok else ("timeout" if run["reason"] == "timeout" else _classify_fork_failure(run))
+            run["messages"].insert(0, f"executed by {runner.name}, {runner.last.get('calls', 0)} action chunks"
+                                      + ("" if runner.last.get("grasped") else ", never closed on the wire"))
+            if not ok:
+                self._drive(self._clear_board(), budget=6.0)
+            return self._result("route_fork", args, ok, outcome, run, time.perf_counter() - t_wall,
+                                controller=runner.name)
         offset = None if pick_offset_mm is None else float(pick_offset_mm) / 1000.0
         run = self._drive(self.expert._route_fork(i, int(attempt), offset), budget=60.0)
         ok = bool(run["value"]) and run["reason"] == "done"

@@ -179,7 +179,7 @@ so the expert, the controller and the observation/action definitions are identic
 | `harness_sim` | Python | `mujoco_sim_node`: physics + UR-driver-like ROS interface |
 | `harness_task` | Python | `routing_task_node` (RouteHarness action server, expert or learned policy), `route_harness` CLI |
 | `harness_learning` | Python | `HarnessRouting-v0` Gymnasium env, `record_demos`, `replay_demo`, `inspect_demos`, `run_expert` |
-| `harness_agent` | Python | build agent: harness specs and drawings, the robot's skills as tools, Nemotron planner on Nebius Token Factory, camera check with a vision model, recovery benchmark, `run_build`, `check_nebius`, `vision_eval`, `benchmark` |
+| `harness_agent` | Python | build agent: harness specs and drawings, the robot's skills as tools, Nemotron planner on Nebius Token Factory, camera check with a vision model, recovery benchmark, GR00T N1.7 demo recorder / client / evaluation, 3D replay recorder, `run_build`, `check_nebius`, `vision_eval`, `benchmark` |
 | `harness_bench` | Python | cross-simulator benchmarks: runs the same rigs and the same analysis on MuJoCo or Isaac Sim and writes a comparison report |
 | `harness_bringup` | Python | `cell.launch.py`, `demo.launch.py`, `config/cell.yaml` |
 
@@ -463,6 +463,26 @@ errors and timeouts, and picks the planner and vision models from the models you
 (`HARNESS_PLANNER_MODEL` / `HARNESS_VISION_MODEL` override the choice).
 
 ---
+
+### GR00T N1.7 as a learned routing skill
+
+The skill level can be learned instead of written. `groot_data` records the expert's
+`route_fork` calls from randomised builds as a GR00T N1.7 fine-tuning set (LeRobot v2: a
+scene and a wrist camera, a 47-value state with the force/torque reading, the 5-D actions of
+the cell's action interface, and the instruction "route the wire into fork F2"). A fine-tuned
+policy is served by GR00T's own policy server; `GrootRunner` plugs it into the session as the
+executor of `route_fork`, so Nemotron's tool call becomes GR00T's instruction and the
+admittance controller underneath stays the same. The skill result says which controller ran
+it (`executed_by`), and by default a retry falls back to the expert.
+
+```bash
+python -m harness_agent.groot_data record --out data/harness_route --builds 330 --workers 14
+python -m harness_agent.groot_eval --forks F1,F2,F3 --seeds 0-19 --out eval/route_v1 --video
+python -m harness_agent.groot_replay_server data/harness_route      # GPU-free stand-in for testing the loop
+```
+
+The full runbook for a Nebius AI Cloud GPU VM (setup, smoke test through GR00T's server in
+replay mode, fine-tuning, closed-loop evaluation, costs) is in [`docs/groot.md`](docs/groot.md).
 
 ## 6. Configuration and randomisation
 

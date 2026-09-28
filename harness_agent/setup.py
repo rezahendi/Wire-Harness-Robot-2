@@ -28,6 +28,10 @@ setup(
             'vision_eval = harness_agent.vision_eval:main',
             'benchmark = harness_agent.benchmark:main',
             'annotate_video = harness_agent.annotate:main',
+            'replay3d = harness_agent.replay3d:main',
+            'groot_data = harness_agent.groot_data:main',
+            'groot_eval = harness_agent.groot_eval:main',
+            'groot_replay_server = harness_agent.groot_replay_server:main',
         ],
     },
 )
