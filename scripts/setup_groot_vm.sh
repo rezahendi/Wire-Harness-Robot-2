@@ -45,7 +45,7 @@ who = GL.glGetString(GL.GL_RENDERER).decode()
 print("OpenGL renderer:", who)
 if any(w in who.lower() for w in ("llvmpipe", "softpipe", "swrast")):
     print("NOTE: the cameras render in software on the CPU, which makes demo recording several times slower.\n"
-          "      The NVIDIA EGL library is missing; see 'Faster recording' in docs/groot.md.")
+          "      The NVIDIA EGL library is missing; see 'Recording speed' in docs/groot.md.")
 r.close()                  # closing explicitly avoids a harmless EGLError traceback at exit
 EOF
 

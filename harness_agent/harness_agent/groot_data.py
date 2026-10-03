@@ -193,11 +193,32 @@ def done_seeds(staging: str) -> set:
     return {int(n[:-5]) for n in os.listdir(d) if n.endswith(".json") and n[:-5].isdigit()}
 
 
+def scripted_build(session, scenario_name: str, routing_only: bool = False) -> None:
+    """The scripted build the demos come from. With ``routing_only`` it stops where the
+    connector stage would begin (a fifth to a third of a build's simulated time): nothing
+    after that point is recorded, and every call before it is exactly the full build's."""
+    from .agent import ScriptedPlanner, ScriptedPolicy
+    from .disturbances import make_scenario
+    from .tools import ToolBox
+
+    scenario = make_scenario(scenario_name, session.route)
+    if not routing_only:
+        ScriptedPlanner(session, log=lambda *_: None).run(scenario=scenario)
+        return
+    box = ToolBox(session, scenario=scenario)                 # as ScriptedPlanner.run, up to the connector
+    policy = ScriptedPolicy(session.route, session.connector_id)
+    last = box.call("get_status", {})
+    for _ in range(60):
+        if box.finished is not None:
+            break
+        name, args = policy.next(last, session.feasible)
+        if name != "route_fork":
+            break
+        last = box.call(name, args)
+
+
 def record_seed(seed: int) -> Dict[str, Any]:
     """Worker: one scripted build; its successful skill calls go to staging as episodes."""
-    from .agent import ScriptedPlanner
-    from .disturbances import make_scenario
-
     staging, skills = _REC["staging"], tuple(_REC["skills"])
     t0 = time.perf_counter()
     for old in glob.glob(os.path.join(staging, f"s{seed:06d}_*")):     # left by an interrupted run
@@ -225,7 +246,7 @@ def record_seed(seed: int) -> Dict[str, Any]:
         session = make_recording_session(_REC["spec_obj"], seed, True, skills, sink, _REC["size"])
         try:
             if session.feasible:
-                ScriptedPlanner(session, log=lambda *_: None).run(scenario=make_scenario(scenario_name, session.route))
+                scripted_build(session, scenario_name, routing_only=set(skills) <= {"route_fork"})
         finally:
             session.close()
     except Exception as exc:                             # a broken build must not end the recording

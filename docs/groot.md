@@ -12,7 +12,7 @@ Measured on a preemptible 1x L40S VM (8 vCPU, 32 GiB, about $0.78/h in eu-north1
 |---|---|---|
 | 1. VM + setup | 30 min | ~$0.40 |
 | 2. smoke test (replay through GR00T's own server) | 10 min | ~$0.15 |
-| 3. record 400 routing demos (7 workers) | ~2 h with software rendering, see [Faster recording](#faster-recording) | ~$1.60 |
+| 3. record 400 routing demos (7 workers) | ~2 h; the simulator's physics sets the pace, see [Recording speed](#recording-speed) | ~$1.60 |
 | 4. fine-tune GR00T N1.7, 6,000 steps at batch 32 | 80-85 min (1.2-1.3 steps/s) | ~$1.10 |
 | 5. closed-loop evaluation, 30 trials | see `summary.md` (wall time is printed) | <$1 |
 
@@ -26,7 +26,8 @@ L40S and H100 are offered):
 
 * GPU: **1x L40S** (48 GB; fine-tuning at batch 32 fits). An H100 trains faster per hour.
 * Preemptible: yes (much cheaper; everything long runs in tmux and checkpoints are saved).
-* Preset: 8 vCPU / 32 GiB (the demo recorder runs one build per vCPU).
+* Preset: 8 vCPU / 32 GiB. Recording runs one build per vCPU and is limited by the CPU, so
+  a preset with more vCPUs records proportionally faster (training does not need them).
 * Boot disk: Ubuntu 24.04 **with CUDA**, 200 GiB (each fine-tuning checkpoint is ~36 GB).
 * Access: a username and the public key from WSL (`ssh-keygen -t ed25519`, then
   `cat ~/.ssh/id_ed25519.pub`); a public IP.
@@ -104,21 +105,31 @@ episodes so far and the time left.
 The first set (`harness_route`, 403 episodes: F1 132, F2 146, F3 125; 12-24 s each, median
 15 s) was stopped early this way.
 
-### Faster recording
+### Recording speed
 
-`bench` prints the OpenGL renderer. If it says `llvmpipe`, the two cameras render in software
-on the CPU: on a 2-vCPU test machine that took ~290 ms per 20 Hz step for both views, against
-~65 ms for physics and control, so recording runs several times slower than it has to. The fix is
-NVIDIA's EGL library for the installed driver; check what is there first, and only install
-the package whose version matches the running driver exactly (a mismatched library breaks
-CUDA until the next reboot):
+`bench` measures one worker: the expert routes F1 without cameras, then the two policy views
+are rendered. On the L40S VM (measured while a fine-tuning run shared the CPUs):
+
+| | per 20 Hz step |
+|---|---|
+| physics and control (MuJoCo at 1 kHz, admittance control at 500 Hz) | 62 ms |
+| both camera views, rendered by the GPU through EGL (`NVIDIA L40S/PCIe/SSE2`) | 4.4 ms |
+
+So a worker records at ~0.75x real time, and the constraint solver is most of it (the wire's
+contacts with elliptic friction cones; about 80% of MuJoCo's step time). The recorder stops
+each build once the forks are routed when only `route_fork` is recorded, which skips the
+connector stage (a fifth to a third of a build's simulated time) without changing a single
+recorded step. More vCPUs is the remaining lever.
+
+If `bench` names `llvmpipe` instead of the GPU, the cameras render in software, ~290 ms per
+step on a 2-vCPU test machine, many times slower. The fix is NVIDIA's EGL library for the
+installed driver; check what is there first, and only install a package whose version
+matches the running driver exactly (a mismatched library breaks CUDA until the next reboot):
 
 ```bash
 nvidia-smi --query-gpu=driver_version --format=csv,noheader
 dpkg -l | grep -E "libnvidia-(gl|compute)"
 ```
-
-With the GPU rendering (`bench` names the NVIDIA GPU), physics is the only cost left.
 
 ## 5. Fine-tune GR00T N1.7
 
