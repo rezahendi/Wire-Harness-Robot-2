@@ -71,6 +71,10 @@ def run_trial(spec, seed: int, fork: str, runner, video_dir: Optional[str] = Non
                "chunks": (runner.client.calls - calls0) if runner is not None else None,
                "inference_s": round(runner.client.seconds - secs0, 2) if runner is not None else None,
                "messages": res.messages[:3]}
+        if runner is not None and runner.last.get("fork") == fork:
+            out.update({"milestones": dict(runner.last.get("milestones") or {}),
+                        "furthest": runner.last.get("furthest"),
+                        "fork_distance_mm": runner.last.get("fork_distance_mm")})
         if video_dir is not None and session.frames:
             import imageio
             os.makedirs(video_dir, exist_ok=True)
@@ -159,6 +163,24 @@ def summarize(rows: List[Dict[str, Any]], title: str) -> str:
             fails[r["outcome"]] = fails.get(r["outcome"], 0) + 1
     if fails:
         lines += ["", "Failures: " + ", ".join(f"{k} {v}" for k, v in sorted(fails.items(), key=lambda x: -x[1]))]
+    return "\n".join(lines) + "\n"
+
+
+def funnel(rows: List[Dict[str, Any]]) -> str:
+    """How far the policy got in each trial: wire in the hand, lifted, carried over the slot, inside it,
+    released there."""
+    from .groot_skill import MILESTONES
+    timed = [r for r in rows if "milestones" in r]
+    if not timed:
+        return ""
+    head = ["wire in hand", "lifted", "over the slot", "inside the slot", "released there"]
+    lines = ["| fork | trials | " + " | ".join(head) + " | routed |", "|---" * (len(head) + 3) + "|"]
+    forks = sorted({r["fork"] for r in timed})
+    for f in forks + ["all"]:
+        rs = [r for r in timed if f == "all" or r["fork"] == f]
+        n = len(rs)
+        cells = [f"{sum(m in r['milestones'] for r in rs)}/{n}" for m in MILESTONES]
+        lines.append(f"| {f} | {n} | " + " | ".join(cells) + f" | {sum(r['ok'] for r in rs)}/{n} |")
     return "\n".join(lines) + "\n"
 
 
@@ -276,6 +298,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     with open(results_path, "w") as f:
         f.writelines(json.dumps(r) + "\n" for r in rows)
     text = summarize(rows, f"Routing with {who}: {len(seeds)} seeds x {', '.join(forks)}")
+    fun = funnel(rows)
+    if fun:
+        text += "\nHow far it got:\n\n" + fun
     lat = latency_line(rows, workers)
     if lat:
         text += "\n" + lat

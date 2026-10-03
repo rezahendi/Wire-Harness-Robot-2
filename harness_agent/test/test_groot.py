@@ -197,6 +197,22 @@ def test_several_clients_share_one_policy_server(tmp_path):
     assert not errors and got == [(1, 16, 4)] * 15 and policy.observations == 15
 
 
+def test_recovery_pushes_follow_the_experts_phase():
+    from harness_agent.groot_data import RecoveryNoise
+    phase = {"now": "pick_close"}
+    noise = RecoveryNoise(1.0, np.random.default_rng(0), phase=lambda: phase["now"])
+    a = np.array([0.2, -0.1, 0.0, 0.0, 1.0])
+    assert np.array_equal(noise(a), a)                                   # closing the gripper: no push
+    phase["now"] = "route_descend"
+    pushed = np.array([noise(a) for _ in range(200)])
+    assert np.all(pushed[:, 2] == 0.0) and np.all(pushed[:, 4] == 1.0)   # no vertical push, gripper untouched
+    assert pushed[:, :2].std() > 0.02
+    phase["now"] = "pick_approach"
+    out = np.array([noise(a) for _ in range(2000)])
+    assert noise.kicks > 5 and np.all(np.abs(out[:, :4]) <= 1.0)
+    assert np.array_equal(RecoveryNoise(0.0, np.random.default_rng(0), phase=lambda: "pick_approach")(a), a)
+
+
 def test_route_stats_count_who_routed_and_skip_refusals():
     from harness_agent.groot_skill import route_stats
     calls = [{"name": "get_status", "result": {"state": {}}},

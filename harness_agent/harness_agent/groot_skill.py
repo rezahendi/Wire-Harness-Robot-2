@@ -9,6 +9,11 @@ The skill counts as done only when the policy has done everything the expert doe
 the wire, left it inside the fork's slot, opened the gripper and lifted clear, held for half a
 second. Otherwise it runs into the time limit and the skill reports ``timeout``, so the
 planner sees an ordinary failed skill and can retry (by default the retry uses the expert).
+
+Along the way the runner notes how far the policy got (``self.last["milestones"]``, seconds
+after the start): the wire really in the hand, lifted above the prongs, carried over the fork
+lined up with its slot, inside the slot, released there. The evaluation turns these into a
+funnel.
 """
 
 from __future__ import annotations
@@ -20,6 +25,9 @@ import numpy as np
 from . import groot_features as gf
 
 REFUSED = ("infeasible_spec", "unknown_fork", "previous_fork_not_seated")
+MILESTONES = ("in_hand", "lifted", "over_slot", "inside", "released")
+IN_HAND_MM = 15.0       # closed gripper with a perceived wire point this close to the TCP
+OVER_SLOT_MM = 5.0      # wire in hand, crossing the fork's slot plane this close to the slot (any height)
 
 
 class GrootRunner:
@@ -64,13 +72,15 @@ class GrootRunner:
         text = gf.instruction("route_fork", fork_id)
         obs = session.obs
         bz = float(obs["board_z"][0])
-        z_clear = bz + cfg.fork.post_height + cfg.fork.prong_height + 0.03
+        z_top = bz + cfg.fork.post_height + cfg.fork.prong_height
+        z_clear = z_top + 0.03
         wire_d = 2.0 * cfg.wire.radius
         t0 = float(obs["time"][0])
         grasped, inside_since = False, None
         queue: list = []
         calls = 0
-        self.last = {"fork": fork_id, "calls": 0, "grasped": False}
+        reached: Dict[str, float] = {}
+        self.last = {"fork": fork_id, "calls": 0, "grasped": False, "milestones": reached, "furthest": None}
         while True:
             if not queue:
                 chunk = self._chunk(session, obs, gf.goal_vector(obs, "route_fork", i, cfg), text)
@@ -84,6 +94,8 @@ class GrootRunner:
                 grasped = True
                 self.last["grasped"] = True
             chk = cable_crossing_in_fork(obs["cable"], obs["forks"][i], cfg.fork, bz)
+            self._milestones(obs, i, opening < wire_d + 0.003, z_top, chk, cfg.fork.slot_width, opening > 0.02,
+                             t - t0)
             if grasped and chk["inside"] and opening > 0.02 and float(obs["tcp_pos"][2]) > z_clear:
                 inside_since = t if inside_since is None else inside_since
                 if t - inside_since >= 0.5:
@@ -91,6 +103,24 @@ class GrootRunner:
                     return True
             else:
                 inside_since = None
+
+    def _milestones(self, obs, i: int, closed: bool, z_top: float, chk: Dict[str, Any], slot_width: float,
+                    opened: bool, t: float) -> None:
+        reached = self.last["milestones"]
+        tcp = np.asarray(obs["tcp_pos"], dtype=float)
+        cable = np.asarray(obs["cable"], dtype=float)
+        in_hand = closed and float(np.min(np.linalg.norm(cable - tcp, axis=1))) < IN_HAND_MM / 1000.0
+        fork_mm = 1000.0 * float(np.linalg.norm(np.asarray(obs["forks"][i][:2], dtype=float) - tcp[:2]))
+        self.last["fork_distance_mm"] = round(fork_mm, 1)
+        lined_up = abs(float(chk["y"])) < slot_width / 2 + OVER_SLOT_MM / 1000.0
+        inside = bool(chk["inside"])
+        for name, now in (("in_hand", in_hand), ("lifted", in_hand and tcp[2] > z_top + 0.01),
+                          ("over_slot", in_hand and lined_up), ("inside", inside),
+                          ("released", inside and opened)):
+            if now and name not in reached:
+                reached[name] = round(t, 2)
+                if self.last["furthest"] is None or MILESTONES.index(name) > MILESTONES.index(self.last["furthest"]):
+                    self.last["furthest"] = name
 
     def close(self) -> None:
         for c in self._cams.values():

@@ -113,6 +113,8 @@ class CellSession:
         self._looks: Dict[str, int] = {}     # inspections per target (each one uses a new view)
         self._last_status: Optional[Dict[str, Any]] = None
         self.step_hook: Optional[Callable[[np.ndarray], None]] = None   # called before each skill step
+        # perturbs the action that is executed (after step_hook saw the clean one), e.g. DART demos
+        self.action_noise: Optional[Callable[[np.ndarray], np.ndarray]] = None
         self.skill_runners: Dict[str, Any] = {}   # skill name -> learned policy runner (e.g. GR00T)
         if self.feasible:
             self.env = HarnessRoutingEnv(cfg=self.cfg, randomize=randomize,
@@ -163,6 +165,8 @@ class CellSession:
             while True:
                 if self.step_hook is not None:       # e.g. the GR00T demo recorder
                     self.step_hook(action)
+                if self.action_noise is not None:
+                    action = self.action_noise(action)
                 _, _, _, _, info = env.step(action)
                 ex._last_obs = self.obs
                 max_f = max(max_f, float(info["contact_force"]))
@@ -352,8 +356,11 @@ class CellSession:
             self.expert.phase = "done"
             ok = bool(run["value"]) and run["reason"] == "done"
             outcome = "routed" if ok else ("timeout" if run["reason"] == "timeout" else _classify_fork_failure(run))
+            furthest = runner.last.get("furthest")
             run["messages"].insert(0, f"executed by {runner.name}, {runner.last.get('calls', 0)} action chunks"
-                                      + ("" if runner.last.get("grasped") else ", never closed on the wire"))
+                                      + ("" if runner.last.get("grasped") else ", never closed on the wire")
+                                      + (f", got as far as: {furthest.replace('_', ' ')}" if furthest else
+                                         ", never held the wire"))
             if not ok:
                 self._drive(self._clear_board(), budget=6.0)
             return self._result("route_fork", args, ok, outcome, run, time.perf_counter() - t_wall,

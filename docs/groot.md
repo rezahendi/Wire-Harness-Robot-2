@@ -105,6 +105,16 @@ episodes so far and the time left.
 The first set (`harness_route`, 403 episodes: F1 132, F2 146, F3 125; 12-24 s each, median
 15 s) was stopped early this way.
 
+Two options make demos that teach recovery:
+
+* `--noise 1.0`: while recording, the executed motion is pushed (a smooth jitter, and now and
+  then a 1.5-3 cm kick while the gripper moves above the wire), but the expert's clean action
+  is what gets recorded. The closed-loop expert brings the gripper back, so the demos show how
+  to get back on track (DART). Each build gets a random push scale up to the given value; no
+  pushes during the touch-down, closing, seating and release.
+* `--hold-after 1.0`: one second of standing still is recorded after each successful call,
+  so the policy learns to stop when the wire is in.
+
 ### Recording speed
 
 `bench` measures one worker: the expert routes F1 without cameras, then the two policy views
@@ -167,8 +177,16 @@ python -m harness_agent.groot_eval --forks F1,F2,F3 --seeds 0-9 --workers 4 --ex
 `--workers 4` runs four trials at once against the one server: the server answers one request
 at a time (~245 ms per action chunk on the L40S), while the simulator and cameras need the
 CPU, so parallel trials keep both busy. `summary.md` has the success rate per fork with a 95%
-interval, time, contact force and the server's round-trip time; `results.jsonl` has every
-trial; `videos/` one clip per trial. Copy results home from WSL:
+interval, time, contact force, how far the policy got (wire in the hand, lifted, over the
+slot, inside, released) and the server's round-trip time; `results.jsonl` has every trial;
+`videos/` one clip per trial.
+
+The first model (`route_v1`, 403 demos, 6,000 steps) routed 7 of 30 trials on unseen boards
+(F1 2/10, F2 1/10, F3 4/10), each as fast as the expert (~15 s), at ~185 ms per action chunk
+with 4 workers. The videos show near misses: the wire carried but not seated, then a drift
+once the demonstrated sequence runs out. The recovery demos and the end hold address that.
+
+Copy results home from WSL:
 
 ```bash
 scp -r <username>@<public-ip>:eval/route_v1 ~/harness_eval_route_v1
@@ -195,6 +213,24 @@ python -m harness_agent.benchmark --planners scripted --groot --seeds 0-4 --out 
 
 `report.md` lists who executed every step; the benchmark table adds "GR00T routed" (routes
 GR00T completed / routes it attempted).
+
+## 8. A whole round, unattended
+
+`scripts/groot_round.sh` chains the steps above: record new demos (with pushes and the end
+hold), package them with the earlier set, fine-tune, serve, and evaluate on 20 test boards
+(60 trials, with the milestone funnel). Each step is skipped when its result exists, so the
+same command continues after a preempted VM. Log: `~/rounds/<name>.log`.
+
+```bash
+tmux new -s round
+bash ~/Wire-Harness-Robot-2/scripts/groot_round.sh route_v2     # ~5-6 h; Ctrl-b d to leave it
+```
+
+Defaults: 240 new builds from seed 2000 (~700 demos), plus `~/data/harness_route`, 12,000
+steps. Change them with environment variables, e.g.
+`BUILDS=120 STEPS=8000 bash .../groot_round.sh route_v2b`. When it prints "round finished",
+stop the VM in the console: shutting it down from inside makes Nebius restart it and keep
+charging.
 
 ## Troubleshooting
 

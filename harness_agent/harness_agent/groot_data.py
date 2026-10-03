@@ -17,6 +17,10 @@ with two camera views, the state vector and the 5-D actions defined in groot_fea
 Failed calls are dropped. Seeds start at 1000 by default, so the benchmark seeds (0-99)
 stay unseen for evaluation.
 
+With --noise the executed motion is pushed around while the expert's clean action is
+recorded, so the demos show how to get back on track (DART); --hold-after adds a short,
+recorded stand-still after each successful call, so the policy learns to stop when done.
+
 Recording can be stopped and resumed. Finished builds are marked in <out>/staging, so the
 same command run again (after a preempted VM, say) skips them. Ctrl-c stops the recording
 and packages the episodes finished so far. ``merge`` combines recorded sets into one.
@@ -29,6 +33,7 @@ from __future__ import annotations
 import argparse
 import glob
 import json
+import math
 import os
 import shutil
 import sys
@@ -82,10 +87,66 @@ class EpisodeBuffer:
         return len(self.actions)
 
 
-def make_recording_session(spec, seed: int, randomize: bool, skills: Sequence[str], sink, size: int):
+class RecoveryNoise:
+    """Pushes on the executed motion for DART-style demos. The recorder keeps the expert's
+    clean action as the label while the robot executes the pushed one, and the closed-loop
+    expert shows how to get back on track. Two kinds of push, both scaled by ``scale``:
+
+    * a smooth jitter (an Ornstein-Uhlenbeck process per axis), and
+    * now and then, while the gripper moves in free space, a kick of 2-4 steps that throws it
+      1.5-3 cm off its path.
+
+    Pushes depend on the expert's phase: none during the guarded touch-down on the wire (a
+    push reads as a touch), while the gripper closes, seats the wire or lets go, and no
+    vertical push while it lowers the wire."""
+
+    SIGMA = np.array([0.20, 0.20, 0.10, 0.15])        # jitter std of dx, dy, dz, dyaw (action units)
+    GAIN = {"pick_approach": (1.0, 1.0, 1.0, 1.0),     # free space above the wire
+            "route_lift": (0.5, 0.5, 0.3, 0.5),        # carrying the taut wire: gentler
+            "route_transit": (0.5, 0.5, 0.3, 0.5),
+            "route_descend": (0.4, 0.4, 0.0, 0.4)}     # lowering the wire beyond the fork
+    KICK_PHASES = ("pick_approach",)
+    KICK_RATE = 0.5                                  # kicks per second of a kick phase, at scale 1
+
+    def __init__(self, scale: float, rng: np.random.Generator, phase=lambda: "", dt: float = 1.0 / gf.FPS,
+                 tau: float = 0.5):
+        self.scale, self.rng, self.phase, self.dt = float(scale), rng, phase, dt
+        self.a = math.exp(-dt / tau)
+        self.x = np.zeros(4)
+        self.kick_left, self.kick = 0, np.zeros(4)
+        self.kicks = 0
+
+    def reset(self) -> None:
+        self.x[:] = 0.0
+        self.kick_left = 0
+
+    def __call__(self, action: np.ndarray) -> np.ndarray:
+        ph = self.phase()
+        gain = np.asarray(self.GAIN.get(ph, (0.0, 0.0, 0.0, 0.0)))
+        self.x = self.a * self.x + math.sqrt(1.0 - self.a ** 2) * self.rng.standard_normal(4) * self.SIGMA
+        out = np.asarray(action, dtype=float).copy()
+        out[:4] += self.scale * gain * self.x
+        if (self.kick_left == 0 and ph in self.KICK_PHASES
+                and self.rng.random() < self.KICK_RATE * self.dt * self.scale):
+            ang = self.rng.uniform(0.0, 2.0 * math.pi)
+            self.kick = 0.8 * np.array([math.cos(ang), math.sin(ang), self.rng.uniform(-0.1, 0.3), 0.0])
+            self.kick_left = int(self.rng.integers(2, 5))
+            self.kicks += 1
+        if self.kick_left > 0:
+            if ph in self.KICK_PHASES:
+                out[:4] = self.kick                  # the push replaces the expert's motion
+            self.kick_left -= 1
+        out[:4] = np.clip(out[:4], -1.0, 1.0)
+        return out
+
+
+def make_recording_session(spec, seed: int, randomize: bool, skills: Sequence[str], sink, size: int,
+                           noise: float = 0.0, hold_after: float = 0.0):
     """A CellSession whose route_fork / insert_connector calls are recorded as episodes.
 
-    ``sink(buffer, result, session)`` receives every finished episode (successful or not)."""
+    ``sink(buffer, result, session)`` receives every finished episode (successful or not).
+    ``noise`` > 0 pushes the executed motion while recording (the scale of the pushes);
+    ``hold_after`` > 0 records that many seconds of standing still after a successful call."""
     from .session import CellSession
 
     class DemoSession(CellSession):
@@ -94,6 +155,9 @@ def make_recording_session(spec, seed: int, randomize: bool, skills: Sequence[st
             self._ep: Optional[EpisodeBuffer] = None
             self._cams = gf.Cameras(self.env.cell.sim.model, size) if self.env is not None else None
             self.step_hook = self._on_step
+            self._noise = (RecoveryNoise(noise, np.random.default_rng(seed + 104729),
+                                         phase=lambda: getattr(self.expert, "phase", ""))
+                           if noise > 0 else None)
 
         def _on_step(self, action: np.ndarray) -> None:
             ep = self._ep
@@ -108,13 +172,29 @@ def make_recording_session(spec, seed: int, randomize: bool, skills: Sequence[st
 
         def _record(self, skill: str, target: str, goal_fn, run):
             self._ep = EpisodeBuffer(skill, target, goal_fn)
+            if self._noise is not None:
+                self._noise.reset()
+                self.action_noise = self._noise
             try:
                 res = run()
+                self.action_noise = None
+                if hold_after > 0 and getattr(res, "ok", False) and len(self._ep):
+                    self._record_hold(hold_after)
             finally:
+                self.action_noise = None
                 ep, self._ep = self._ep, None
             if len(ep):
                 sink(ep, res, self)
             return res
+
+        def _record_hold(self, seconds: float) -> None:
+            """Stand still with the gripper as it is, recorded: the policy learns to stop when done."""
+            for _ in range(max(1, int(round(seconds * gf.FPS)))):
+                a = self.expert._hold()
+                self._on_step(a)
+                self.env.step(a)
+                self.expert._last_obs = self.obs
+                self._grab_frame()
 
         def route_fork(self, fork_id: str, attempt: int = 0, pick_offset_mm: Optional[float] = None):
             i = self._fork_index(fork_id)
@@ -225,6 +305,8 @@ def record_seed(seed: int) -> Dict[str, Any]:
         shutil.rmtree(old, ignore_errors=True)
     rng = np.random.default_rng(seed + 7919)
     scenario_name = "popped_wire" if rng.random() < _REC["popped"] else "nominal"
+    noise = round(float(np.random.default_rng(seed + 31337).uniform(0.0, 1.0)) * _REC.get("noise", 0.0), 3)
+    hold = float(_REC.get("hold_after", 0.0))
     res: Dict[str, Any] = {"seed": seed, "scenario": scenario_name, "kept": 0, "dropped": 0}
     order = 0
 
@@ -239,11 +321,13 @@ def record_seed(seed: int) -> Dict[str, Any]:
             "seed": seed, "order": order, "skill": ep.skill, "target": ep.target,
             "attempt": args.get("attempt", 0), "scenario": scenario_name, "outcome": out.outcome,
             "max_force": round(float(out.max_force), 2),
-            "t_start": round(float(out.sim_time_start), 2)})
+            "t_start": round(float(out.sim_time_start), 2),
+            **({"noise": noise} if noise else {}), **({"hold_s": hold} if hold else {})})
         res["kept"] += 1
 
     try:
-        session = make_recording_session(_REC["spec_obj"], seed, True, skills, sink, _REC["size"])
+        session = make_recording_session(_REC["spec_obj"], seed, True, skills, sink, _REC["size"],
+                                         noise=noise, hold_after=hold)
         try:
             if session.feasible:
                 scripted_build(session, scenario_name, routing_only=set(skills) <= {"route_fork"})
@@ -266,7 +350,7 @@ def _duration(seconds: float) -> str:
 
 
 def record(seeds: Sequence[int], out: str, workers: int, skills: Sequence[str], popped: float, spec: str,
-           size: int) -> Dict[str, Any]:
+           size: int, noise: float = 0.0, hold_after: float = 0.0) -> Dict[str, Any]:
     """Record the builds that are not done yet, then package everything staged into ``out``."""
     if os.path.exists(os.path.join(out, "meta", "info.json")):
         raise SystemExit(f"{out} already holds a packaged dataset. Record into a new folder and combine the two:\n"
@@ -278,7 +362,8 @@ def record(seeds: Sequence[int], out: str, workers: int, skills: Sequence[str], 
     if len(todo) < len(seeds):
         print(f"resuming: {len(seeds) - len(todo)} of {len(seeds)} builds were already recorded in {staging}")
     workers = max(1, min(workers, len(todo)))
-    job = {"staging": staging, "skills": list(skills), "popped": popped, "spec": spec, "size": size}
+    job = {"staging": staging, "skills": list(skills), "popped": popped, "spec": spec, "size": size,
+           "noise": noise, "hold_after": hold_after}
     print(f"recording {len(todo)} builds on {workers} worker{'s' if workers > 1 else ''} "
           f"(skills: {', '.join(skills)}) -> {out}\nCtrl-c stops and packages the episodes recorded so far.",
           flush=True)
@@ -677,6 +762,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     r.add_argument("--popped", type=float, default=0.25, help="share of builds where F2 loses the wire")
     r.add_argument("--spec", default=DEFAULT_SPEC)
     r.add_argument("--size", type=int, default=gf.IMAGE_SIZE)
+    r.add_argument("--noise", type=float, default=0.0,
+                   help="recovery demos: push the executed motion while the expert's clean action is "
+                        "recorded; each build gets a random scale up to this (try 1.0)")
+    r.add_argument("--hold-after", type=float, default=0.0,
+                   help="record this many seconds of standing still after each successful call (try 1.0)")
     c = sub.add_parser("check", help="validate a recorded set and print a summary")
     c.add_argument("dataset")
     c.add_argument("--preview", help="write a contact sheet PNG here")
@@ -714,7 +804,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     seeds = _parse_seeds(args.seeds) if args.seeds else list(range(args.seed_start, args.seed_start + args.builds))
     skills = [s.strip() for s in args.skills.split(",") if s.strip()]
-    res = record(seeds, args.out, args.workers, skills, args.popped, _spec_path(args.spec), args.size)
+    res = record(seeds, args.out, args.workers, skills, args.popped, _spec_path(args.spec), args.size,
+                 noise=args.noise, hold_after=args.hold_after)
     print(f"{res['episodes']} episodes ({res['frames']} frames) in {args.out}, {res['dropped']} failed skill calls "
           f"dropped, {res['seconds']} s; tasks: {res['tasks']}")
     if res["errors"]:
