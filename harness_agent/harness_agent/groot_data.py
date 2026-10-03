@@ -336,9 +336,10 @@ def record_seed(seed: int) -> Dict[str, Any]:
     except Exception as exc:                             # a broken build must not end the recording
         res["error"] = f"{type(exc).__name__}: {exc}"
     res["seconds"] = round(time.perf_counter() - t0, 1)
-    os.makedirs(os.path.join(staging, DONE_DIR), exist_ok=True)
-    with open(os.path.join(staging, DONE_DIR, f"{seed}.json"), "w") as f:
-        json.dump(res, f)
+    if "error" not in res:                               # a crashed build is tried again on resume
+        os.makedirs(os.path.join(staging, DONE_DIR), exist_ok=True)
+        with open(os.path.join(staging, DONE_DIR, f"{seed}.json"), "w") as f:
+            json.dump(res, f)
     return res
 
 
