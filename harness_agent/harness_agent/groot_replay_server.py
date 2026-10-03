@@ -1,6 +1,6 @@
 """A stand-in for GR00T's policy server that replays recorded episodes (no GPU needed).
 
-    python -m harness_agent.groot_replay_server data/harness_route --port 5555
+    python -m harness_agent.groot_replay_server data/harness_route --port 5556
     python -m harness_agent.groot_eval --replay-dataset data/harness_route --seeds 1000 --forks F1 --out eval/replay
 
 It speaks the same protocol as gr00t/eval/run_gr00t_server.py (ZeroMQ REQ/REP, msgpack +
@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 
 from . import groot_features as gf
-from .groot_client import pack, unpack
+from .groot_client import DEFAULT_PORT, pack, unpack
 
 
 class ReplayPolicy:
@@ -86,7 +86,7 @@ class ReplayPolicy:
         return [out, {"episode_index": self.episode_index, "current_step": self.step - self.execution_horizon}]
 
 
-def serve(policy: ReplayPolicy, host: str = "*", port: int = 5555, max_requests: Optional[int] = None) -> None:
+def serve(policy: ReplayPolicy, host: str = "*", port: int = DEFAULT_PORT, max_requests: Optional[int] = None) -> None:
     import zmq
     ctx = zmq.Context()
     sock = ctx.socket(zmq.REP)
@@ -122,7 +122,7 @@ def serve(policy: ReplayPolicy, host: str = "*", port: int = 5555, max_requests:
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("dataset")
-    ap.add_argument("--port", type=int, default=5555)
+    ap.add_argument("--port", type=int, default=DEFAULT_PORT)
     ap.add_argument("--execution-horizon", type=int, default=8)
     args = ap.parse_args(argv)
     policy = ReplayPolicy(args.dataset, execution_horizon=args.execution_horizon)

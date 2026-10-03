@@ -1,7 +1,9 @@
 """Record the force-guided expert's skills as a GR00T N1.7 fine-tuning set (LeRobot v2 format).
 
-    python -m harness_agent.groot_data record --out data/harness_route --builds 400 --workers 12
-    python -m harness_agent.groot_data check data/harness_route          # counts, lengths, preview
+    python -m harness_agent.groot_data bench                       # how fast this machine records
+    python -m harness_agent.groot_data record --out data/harness_route --builds 330 --workers 7
+    python -m harness_agent.groot_data check data/harness_route --preview data/route_preview.png
+    python -m harness_agent.groot_data merge data/harness_route data/harness_route2 --out data/route_all
 
 Every build is a full scripted build of a randomised board (layout, wire stiffness, friction,
 slack and initial wire shape all vary with the seed); a share of the builds has the wire
@@ -15,18 +17,23 @@ with two camera views, the state vector and the 5-D actions defined in groot_fea
 Failed calls are dropped. Seeds start at 1000 by default, so the benchmark seeds (0-99)
 stay unseen for evaluation.
 
+Recording can be stopped and resumed. Finished builds are marked in <out>/staging, so the
+same command run again (after a preempted VM, say) skips them. Ctrl-c stops the recording
+and packages the episodes finished so far. ``merge`` combines recorded sets into one.
+
 Rendering needs an OpenGL backend: MUJOCO_GL=egl on a GPU machine, osmesa elsewhere.
 """
 
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import os
 import shutil
 import sys
 import time
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -34,6 +41,14 @@ from . import groot_features as gf
 
 CHUNK_SIZE = 1000
 DEFAULT_SPEC = "demo_3fork.yaml"
+DONE_DIR = "_done"          # in staging: one marker per finished build, for resuming
+
+
+def single_threaded_math() -> None:
+    """One BLAS/OpenMP thread per worker process (inherited by workers started after this):
+    the workers already fill the cores, and oversubscribed math libraries slow all of them."""
+    for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+        os.environ.setdefault(var, "1")
 
 
 def _spec_path(name: str) -> str:
@@ -157,45 +172,128 @@ def write_episode(ep: EpisodeBuffer, folder: str, meta: Dict[str, Any], fps: int
         json.dump({**meta, "task": ep.text, "length": n}, f)
 
 
-def record_builds(job: Dict[str, Any]) -> Dict[str, Any]:
-    """Worker: run scripted builds for the given seeds, write successful episodes to staging."""
+_REC: Dict[str, Any] = {}
+
+
+def _init_recorder(job: Dict[str, Any], pool: bool = False) -> None:
+    """Per worker process: the job settings and the parsed spec."""
+    if pool:
+        import signal
+        signal.signal(signal.SIGINT, signal.SIG_IGN)     # Ctrl-c is the parent's business
+    from .spec import HarnessSpec
+    _REC.clear()
+    _REC.update(job)
+    _REC["spec_obj"] = HarnessSpec.from_yaml(job["spec"])
+
+
+def done_seeds(staging: str) -> set:
+    d = os.path.join(staging, DONE_DIR)
+    if not os.path.isdir(d):
+        return set()
+    return {int(n[:-5]) for n in os.listdir(d) if n.endswith(".json") and n[:-5].isdigit()}
+
+
+def record_seed(seed: int) -> Dict[str, Any]:
+    """Worker: one scripted build; its successful skill calls go to staging as episodes."""
     from .agent import ScriptedPlanner
     from .disturbances import make_scenario
-    from .spec import HarnessSpec
 
-    spec = HarnessSpec.from_yaml(job["spec"])
-    staging, skills = job["staging"], tuple(job["skills"])
-    kept = dropped = 0
+    staging, skills = _REC["staging"], tuple(_REC["skills"])
     t0 = time.perf_counter()
-    for seed in job["seeds"]:
-        rng = np.random.default_rng(seed + 7919)
-        scenario_name = "popped_wire" if rng.random() < job["popped"] else "nominal"
-        counter = {"k": 0}
+    for old in glob.glob(os.path.join(staging, f"s{seed:06d}_*")):     # left by an interrupted run
+        shutil.rmtree(old, ignore_errors=True)
+    rng = np.random.default_rng(seed + 7919)
+    scenario_name = "popped_wire" if rng.random() < _REC["popped"] else "nominal"
+    res: Dict[str, Any] = {"seed": seed, "scenario": scenario_name, "kept": 0, "dropped": 0}
+    order = 0
 
-        def sink(ep: EpisodeBuffer, res, session, seed=seed, scenario_name=scenario_name, counter=counter):
-            nonlocal kept, dropped
-            counter["k"] += 1
-            if not getattr(res, "ok", False):
-                dropped += 1
-                return
-            name = f"s{seed:06d}_{counter['k']:02d}"
-            args = getattr(res, "args", {}) or {}
-            write_episode(ep, os.path.join(staging, name), {
-                "seed": seed, "order": counter["k"], "skill": ep.skill, "target": ep.target,
-                "attempt": args.get("attempt", 0), "scenario": scenario_name, "outcome": res.outcome,
-                "max_force": round(float(res.max_force), 2),
-                "t_start": round(float(res.sim_time_start), 2)})
-            kept += 1
+    def sink(ep: EpisodeBuffer, out, session) -> None:
+        nonlocal order
+        order += 1
+        if not getattr(out, "ok", False):
+            res["dropped"] += 1
+            return
+        args = getattr(out, "args", {}) or {}
+        write_episode(ep, os.path.join(staging, f"s{seed:06d}_{order:02d}"), {
+            "seed": seed, "order": order, "skill": ep.skill, "target": ep.target,
+            "attempt": args.get("attempt", 0), "scenario": scenario_name, "outcome": out.outcome,
+            "max_force": round(float(out.max_force), 2),
+            "t_start": round(float(out.sim_time_start), 2)})
+        res["kept"] += 1
 
-        session = make_recording_session(spec, seed, True, skills, sink, job["size"])
+    try:
+        session = make_recording_session(_REC["spec_obj"], seed, True, skills, sink, _REC["size"])
         try:
-            if not session.feasible:
-                continue
-            ScriptedPlanner(session, log=lambda *_: None).run(scenario=make_scenario(scenario_name, session.route))
+            if session.feasible:
+                ScriptedPlanner(session, log=lambda *_: None).run(scenario=make_scenario(scenario_name, session.route))
         finally:
             session.close()
-    return {"kept": kept, "dropped": dropped, "seeds": len(job["seeds"]),
-            "wall_s": round(time.perf_counter() - t0, 1)}
+    except Exception as exc:                             # a broken build must not end the recording
+        res["error"] = f"{type(exc).__name__}: {exc}"
+    res["seconds"] = round(time.perf_counter() - t0, 1)
+    os.makedirs(os.path.join(staging, DONE_DIR), exist_ok=True)
+    with open(os.path.join(staging, DONE_DIR, f"{seed}.json"), "w") as f:
+        json.dump(res, f)
+    return res
+
+
+def _duration(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    if seconds >= 3600:
+        return f"{seconds // 3600} h {seconds % 3600 // 60:02d} min"
+    return f"{seconds // 60} min" if seconds >= 120 else f"{seconds} s"
+
+
+def record(seeds: Sequence[int], out: str, workers: int, skills: Sequence[str], popped: float, spec: str,
+           size: int) -> Dict[str, Any]:
+    """Record the builds that are not done yet, then package everything staged into ``out``."""
+    if os.path.exists(os.path.join(out, "meta", "info.json")):
+        raise SystemExit(f"{out} already holds a packaged dataset. Record into a new folder and combine the two:\n"
+                         f"  python -m harness_agent.groot_data merge {out} NEW_FOLDER --out COMBINED_FOLDER")
+    staging = os.path.join(out, "staging")
+    os.makedirs(os.path.join(staging, DONE_DIR), exist_ok=True)
+    done = done_seeds(staging)
+    todo = [s for s in seeds if s not in done]
+    if len(todo) < len(seeds):
+        print(f"resuming: {len(seeds) - len(todo)} of {len(seeds)} builds were already recorded in {staging}")
+    workers = max(1, min(workers, len(todo)))
+    job = {"staging": staging, "skills": list(skills), "popped": popped, "spec": spec, "size": size}
+    print(f"recording {len(todo)} builds on {workers} worker{'s' if workers > 1 else ''} "
+          f"(skills: {', '.join(skills)}) -> {out}\nCtrl-c stops and packages the episodes recorded so far.",
+          flush=True)
+    t0 = time.perf_counter()
+    tally = {"builds": 0, "kept": 0, "dropped": 0, "errors": 0}
+
+    def progress(res: Dict[str, Any]) -> None:
+        tally["builds"] += 1
+        tally["kept"] += res["kept"]
+        tally["dropped"] += res["dropped"]
+        tally["errors"] += "error" in res
+        n = tally["builds"]
+        left = (time.perf_counter() - t0) / n * (len(todo) - n)
+        note = f" ERROR {res['error']}" if "error" in res else ""
+        print(f"[{n}/{len(todo)}] seed {res['seed']}: {res['kept']} episodes in {res['seconds']:.0f} s{note} | "
+              f"{tally['kept']} episodes so far, about {_duration(left)} left", flush=True)
+
+    stopped = False
+    try:
+        if workers == 1:
+            _init_recorder(job)
+            for seed in todo:
+                progress(record_seed(seed))
+        elif todo:
+            import multiprocessing as mp
+            single_threaded_math()
+            with mp.get_context("spawn").Pool(workers, initializer=_init_recorder, initargs=(job, True)) as pool:
+                for res in pool.imap_unordered(record_seed, todo):
+                    progress(res)
+    except KeyboardInterrupt:
+        stopped = True
+        print("\nstopped: packaging the episodes recorded so far (about a minute) ...", flush=True)
+    summary = merge(staging, out, size)
+    summary.update({"dropped": tally["dropped"], "errors": tally["errors"], "stopped": stopped,
+                    "seconds": round(time.perf_counter() - t0)})
+    return summary
 
 
 # ------------------------------------------------------------------- merge
@@ -236,28 +334,130 @@ def info_json(total_episodes: int, total_frames: int, total_tasks: int, size: in
     }
 
 
-def merge(staging: str, out: str, size: int, move: bool = True) -> Dict[str, Any]:
-    """Turn staged episodes into one LeRobot v2 dataset with GR00T's meta files."""
+def _fingerprint(feature: str, meta: Dict[str, Any]) -> str:
+    """Same cache key as gr00t.data.stats, so GR00T reuses our statistics instead of recomputing."""
+    import hashlib
+    payload = json.dumps({"feature": feature, "dtype": meta.get("dtype"), "shape": meta.get("shape")},
+                         sort_keys=True, separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def write_stats(dataset: str) -> Dict[str, Any]:
+    """meta/stats.json as GR00T's generate_stats writes it (mean, std, min, max, q01, q99 per float column).
+    Fine-tuning would compute it itself, but GR00T's replay server needs it to exist."""
+    import glob as _glob
+
+    import pyarrow.parquet as pq
+    with open(os.path.join(dataset, "meta", "info.json")) as f:
+        features = json.load(f)["features"]
+    cols = [k for k, v in features.items() if "float" in v["dtype"]]
+    data: Dict[str, List[np.ndarray]] = {c: [] for c in cols}
+    for path in sorted(_glob.glob(os.path.join(dataset, "data", "*", "*.parquet"))):
+        t = pq.read_table(path, columns=cols).to_pydict()
+        for c in cols:
+            data[c].append(np.asarray(t[c], dtype=np.float32).reshape(len(t[c]), -1))
+    stats: Dict[str, Any] = {}
+    for c in cols:
+        a = np.vstack(data[c]) if data[c] else np.zeros((1, 1), np.float32)
+        stats[c] = {"mean": a.mean(0).tolist(), "std": a.std(0).tolist(), "min": a.min(0).tolist(),
+                    "max": a.max(0).tolist(), "q01": np.quantile(a, 0.01, axis=0).tolist(),
+                    "q99": np.quantile(a, 0.99, axis=0).tolist()}
+    stats["__fingerprints__"] = {c: _fingerprint(c, features[c]) for c in cols}
+    with open(os.path.join(dataset, "meta", "stats.json"), "w") as f:
+        json.dump(stats, f, indent=4)
+    return stats
+
+
+def episodes_in(source: str) -> Tuple[str, List[Dict[str, Any]], Optional[int]]:
+    """The episodes of a recorded folder: a packaged dataset, a recording's staging folder, or the
+    recording folder holding it. Returns (kind, [{meta, parquet, videos}], image size or None)."""
+    if os.path.exists(os.path.join(source, "meta", "info.json")):
+        meta_dir = os.path.join(source, "meta")
+        with open(os.path.join(meta_dir, "info.json")) as f:
+            info = json.load(f)
+        with open(os.path.join(meta_dir, "episodes.jsonl")) as f:
+            episodes = [json.loads(line) for line in f]
+        extra: Dict[int, Dict[str, Any]] = {}
+        if os.path.exists(os.path.join(meta_dir, "harness_episodes.jsonl")):
+            with open(os.path.join(meta_dir, "harness_episodes.jsonl")) as f:
+                for line in f:
+                    e = json.loads(line)
+                    extra[int(e["episode_index"])] = e
+        found = []
+        for e in episodes:
+            i = int(e["episode_index"])
+            chunk = i // info["chunks_size"]
+            meta = {k: v for k, v in extra.get(i, {}).items() if k != "episode_index"}
+            meta["task"] = e["tasks"][0]
+            meta["length"] = e["length"]
+            found.append({"meta": meta,
+                          "parquet": os.path.join(source, info["data_path"].format(episode_chunk=chunk,
+                                                                                    episode_index=i)),
+                          "videos": {k: os.path.join(source, info["video_path"].format(
+                              episode_chunk=chunk, video_key=f"observation.images.{k}", episode_index=i))
+                              for k in gf.VIDEO_KEYS}})
+        size = info["features"][f"observation.images.{gf.VIDEO_KEYS[0]}"]["shape"][0]
+        return "dataset", found, int(size)
+    staging = os.path.join(source, "staging") if os.path.isdir(os.path.join(source, "staging")) else source
+    if not os.path.isdir(staging):
+        raise SystemExit(f"{source}: no dataset and no recorded episodes here")
+    found = []
+    for d in sorted(os.listdir(staging)):
+        folder = os.path.join(staging, d)
+        if not os.path.exists(os.path.join(folder, "meta.json")):      # written last: unfinished otherwise
+            continue
+        with open(os.path.join(folder, "meta.json")) as f:
+            meta = json.load(f)
+        found.append({"meta": meta, "parquet": os.path.join(folder, "data.parquet"),
+                      "videos": {k: os.path.join(folder, f"{k}.mp4") for k in gf.VIDEO_KEYS}})
+    return "staging", found, None
+
+
+def merge(sources: Union[str, Sequence[str]], out: str, size: Optional[int] = None,
+          keep_staging: bool = False) -> Dict[str, Any]:
+    """Package recorded episodes into one LeRobot v2 dataset with GR00T's meta files.
+
+    Sources are packaged datasets and staging folders; files are copied, so an interrupted
+    merge can simply be run again. Staging folders are removed once the dataset is complete,
+    unless ``keep_staging``. Episodes recorded twice (same seed, call, skill, target, scenario
+    and length) are kept once."""
     import pyarrow as pa
     import pyarrow.parquet as pq
 
-    names = sorted(d for d in os.listdir(staging) if os.path.exists(os.path.join(staging, d, "meta.json")))
-    metas = []
-    for d in names:
-        with open(os.path.join(staging, d, "meta.json")) as f:
-            metas.append(json.load(f))
-    tasks: List[str] = []
-    for m in metas:
-        if m["task"] not in tasks:
-            tasks.append(m["task"])
-    tasks.sort()
+    sources = [sources] if isinstance(sources, str) else list(sources)
+    if os.path.exists(os.path.join(out, "meta", "info.json")):
+        raise SystemExit(f"{out} already holds a dataset; merge into a new folder")
+    items: List[Dict[str, Any]] = []
+    staged: List[str] = []
+    seen: set = set()
+    duplicates = 0
+    for src in sources:
+        kind, found, src_size = episodes_in(src)
+        if src_size is not None:
+            if size is None:
+                size = src_size
+            elif src_size != size:
+                raise SystemExit(f"{src} has {src_size} px images, the merged set {size} px")
+        for it in found:
+            m = it["meta"]
+            key = (m.get("seed"), m.get("order"), m.get("skill"), m.get("target"), m.get("scenario"),
+                   m.get("length"))
+            if m.get("seed") is not None and key in seen:
+                duplicates += 1
+                continue
+            seen.add(key)
+            items.append(it)
+        if kind == "staging" and not keep_staging:
+            staged.append(os.path.join(src, "staging") if os.path.isdir(os.path.join(src, "staging")) else src)
+    size = size or gf.IMAGE_SIZE
+    tasks = sorted({it["meta"]["task"] for it in items})
     os.makedirs(os.path.join(out, "meta"), exist_ok=True)
     index = 0
     episodes, extra = [], []
-    for ep_idx, (d, m) in enumerate(zip(names, metas)):
+    for ep_idx, it in enumerate(items):
+        m = it["meta"]
         chunk = ep_idx // CHUNK_SIZE
-        src = os.path.join(staging, d)
-        table = pq.read_table(os.path.join(src, "data.parquet"))
+        table = pq.read_table(it["parquet"])
         n = table.num_rows
         table = table.set_column(table.schema.get_field_index("episode_index"), "episode_index",
                                  pa.array(np.full(n, ep_idx, dtype=np.int64)))
@@ -271,10 +471,10 @@ def merge(staging: str, out: str, size: int, move: bool = True) -> Dict[str, Any
         for k in gf.VIDEO_KEYS:
             vdir = os.path.join(out, "videos", f"chunk-{chunk:03d}", f"observation.images.{k}")
             os.makedirs(vdir, exist_ok=True)
-            (shutil.move if move else shutil.copy2)(os.path.join(src, f"{k}.mp4"),
-                                                     os.path.join(vdir, f"episode_{ep_idx:06d}.mp4"))
+            shutil.copy2(it["videos"][k], os.path.join(vdir, f"episode_{ep_idx:06d}.mp4"))
         episodes.append({"episode_index": ep_idx, "tasks": [m["task"]], "length": n})
-        extra.append({"episode_index": ep_idx, **{k: v for k, v in m.items() if k != "task"}, "task": m["task"]})
+        extra.append({"episode_index": ep_idx, **{k: v for k, v in m.items() if k not in ("task", "length")},
+                      "length": n, "task": m["task"]})
         index += n
     meta = os.path.join(out, "meta")
     with open(os.path.join(meta, "episodes.jsonl"), "w") as f:
@@ -287,9 +487,10 @@ def merge(staging: str, out: str, size: int, move: bool = True) -> Dict[str, Any
         json.dump(info_json(len(episodes), index, len(tasks), size), f, indent=2)
     with open(os.path.join(meta, "harness_episodes.jsonl"), "w") as f:
         f.writelines(json.dumps(e) + "\n" for e in extra)
-    if move:
-        shutil.rmtree(staging, ignore_errors=True)
-    return {"episodes": len(episodes), "frames": index, "tasks": tasks}
+    write_stats(out)
+    for st in staged:
+        shutil.rmtree(st, ignore_errors=True)
+    return {"episodes": len(episodes), "frames": index, "tasks": tasks, "duplicates": duplicates}
 
 
 # ------------------------------------------------------------------- check
@@ -363,6 +564,73 @@ def _preview(dataset: str, info: Dict[str, Any], episodes: List[Dict[str, Any]],
     sheet.save(out)
 
 
+# ------------------------------------------------------------------- bench
+def _gl_strings() -> Dict[str, str]:
+    """Who renders: the GPU's OpenGL driver, or a software fallback (needs a current GL context)."""
+    try:
+        from OpenGL import GL
+        return {k: GL.glGetString(e).decode() for k, e in
+                (("vendor", GL.GL_VENDOR), ("renderer", GL.GL_RENDERER), ("version", GL.GL_VERSION))}
+    except Exception as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
+def bench(spec: str = DEFAULT_SPEC, seed: int = 1000, size: int = gf.IMAGE_SIZE, frames: int = 40) -> Dict[str, Any]:
+    """How fast this machine records, per worker: the expert routes F1 without cameras (physics
+    and control), then the two policy views are rendered ``frames`` times."""
+    import mujoco
+
+    from .session import CellSession
+    from .spec import HarnessSpec
+
+    try:
+        cpus = len(os.sched_getaffinity(0))
+    except AttributeError:
+        cpus = os.cpu_count() or 1
+    out: Dict[str, Any] = {"cpus": cpus, "MUJOCO_GL": os.environ.get("MUJOCO_GL", "(not set)"),
+                           "mujoco": mujoco.__version__}
+    session = CellSession(HarnessSpec.from_yaml(_spec_path(spec)), seed=seed, randomize=True)
+    try:
+        t = time.perf_counter()
+        session.status()
+        routed = session.route_fork(session.route[0]).ok
+        wall = time.perf_counter() - t
+        sim = session.sim_time
+        cams = gf.Cameras(session.env.cell.sim.model, size)
+        try:
+            cams.render(session.env.cell.sim.data)                  # warm up; leaves the context current
+            out["gl"] = _gl_strings()
+            t = time.perf_counter()
+            for _ in range(frames):
+                cams.render(session.env.cell.sim.data)
+            render_ms = 1000 * (time.perf_counter() - t) / frames
+        finally:
+            cams.close()
+    finally:
+        session.close()
+    step_ms = 1000 * wall / (sim * gf.FPS)                          # physics + control per 20 Hz step
+    out["physics"] = {"robot_s": round(sim, 1), "wall_s": round(wall, 1), "x_realtime": round(sim / wall, 2),
+                      "ms_per_step": round(step_ms, 1), "routed": bool(routed)}
+    out["render_ms_per_step"] = round(render_ms, 1)                  # both views
+    out["recording_x_realtime"] = round(1000 / gf.FPS / (step_ms + render_ms), 2)
+    who = (out["gl"].get("renderer", "") + " " + out["gl"].get("vendor", "")).lower()
+    out["software_rendering"] = any(w in who for w in ("llvmpipe", "softpipe", "swrast", "software"))
+    return out
+
+
+def _bench_report(b: Dict[str, Any]) -> str:
+    gl = b["gl"].get("renderer") or b["gl"].get("error", "?")
+    lines = [f"physics + control  {b['physics']['ms_per_step']:.1f} ms per 20 Hz step "
+             f"({b['physics']['x_realtime']:.1f}x real time; F1 {'routed' if b['physics']['routed'] else 'NOT routed'})",
+             f"rendering          {b['render_ms_per_step']:.1f} ms per step for both views ({gl})",
+             f"recording          {b['recording_x_realtime']:.2f}x real time per worker, so a 15 s routing "
+             f"episode takes about {15 / max(b['recording_x_realtime'], 1e-3):.0f} s; {b['cpus']} CPUs here"]
+    if b["software_rendering"]:
+        lines.append("warning: OpenGL runs in software on the CPU. On a GPU machine set MUJOCO_GL=egl and check "
+                     "that the NVIDIA EGL library is installed (libnvidia-gl / libEGL_nvidia).")
+    return "\n".join(lines)
+
+
 # --------------------------------------------------------------------- CLI
 def _parse_seeds(text: str) -> List[int]:
     out: List[int] = []
@@ -378,7 +646,7 @@ def _parse_seeds(text: str) -> List[int]:
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    r = sub.add_parser("record", help="run scripted builds and record skill episodes")
+    r = sub.add_parser("record", help="run scripted builds and record skill episodes (resumes where it stopped)")
     r.add_argument("--out", required=True)
     r.add_argument("--builds", type=int, default=100)
     r.add_argument("--seed-start", type=int, default=1000)
@@ -391,38 +659,45 @@ def main(argv: Optional[List[str]] = None) -> int:
     c = sub.add_parser("check", help="validate a recorded set and print a summary")
     c.add_argument("dataset")
     c.add_argument("--preview", help="write a contact sheet PNG here")
+    m = sub.add_parser("merge", help="package recorded folders (datasets, or a stopped recording) into one dataset")
+    m.add_argument("sources", nargs="+")
+    m.add_argument("--out", required=True)
+    m.add_argument("--size", type=int, help="image size (default: from the sources)")
+    m.add_argument("--keep-staging", action="store_true", help="keep the staged episodes after packaging")
+    st = sub.add_parser("stats", help="(re)write meta/stats.json the way GR00T computes it")
+    st.add_argument("dataset")
+    b = sub.add_parser("bench", help="how fast this machine records (renderer, render time, physics speed)")
+    b.add_argument("--spec", default=DEFAULT_SPEC)
+    b.add_argument("--seed", type=int, default=1000)
+    b.add_argument("--size", type=int, default=gf.IMAGE_SIZE)
+    b.add_argument("--json", action="store_true", help="print the raw numbers")
     args = ap.parse_args(argv)
 
     if args.cmd == "check":
         res = check(args.dataset, args.preview)
         print(json.dumps(res, indent=2))
         return 1 if res["problems"] else 0
+    if args.cmd == "merge":
+        res = merge(args.sources, args.out, args.size, keep_staging=args.keep_staging)
+        note = f", {res['duplicates']} duplicates left out" if res["duplicates"] else ""
+        print(f"{res['episodes']} episodes ({res['frames']} frames){note} -> {args.out}; tasks: {res['tasks']}")
+        return 0
+    if args.cmd == "stats":
+        write_stats(args.dataset)
+        print(f"wrote {os.path.join(args.dataset, 'meta', 'stats.json')}")
+        return 0
+    if args.cmd == "bench":
+        res = bench(args.spec, args.seed, args.size)
+        print(json.dumps(res, indent=2) if args.json else _bench_report(res))
+        return 0
 
     seeds = _parse_seeds(args.seeds) if args.seeds else list(range(args.seed_start, args.seed_start + args.builds))
-    staging = os.path.join(args.out, "staging")
-    os.makedirs(staging, exist_ok=True)
     skills = [s.strip() for s in args.skills.split(",") if s.strip()]
-    workers = max(1, min(args.workers, len(seeds)))
-    jobs = [{"seeds": seeds[k::workers], "staging": staging, "skills": skills, "popped": args.popped,
-             "spec": _spec_path(args.spec), "size": args.size} for k in range(workers)]
-    t0 = time.perf_counter()
-    print(f"recording {len(seeds)} builds on {workers} workers (skills: {', '.join(skills)}) -> {args.out}")
-    if workers == 1:
-        results = [record_builds(jobs[0])]
-    else:
-        import multiprocessing as mp
-        with mp.get_context("spawn").Pool(workers) as pool:
-            results = []
-            for res in pool.imap_unordered(record_builds, jobs):
-                results.append(res)
-                print(f"  worker done: {res}", flush=True)
-    summary = merge(staging, args.out, args.size)
-    kept = sum(r["kept"] for r in results)
-    dropped = sum(r["dropped"] for r in results)
-    print(f"{summary['episodes']} episodes ({summary['frames']} frames), {dropped} failed skill calls dropped, "
-          f"{time.perf_counter() - t0:.0f} s; tasks: {summary['tasks']}")
-    if kept != summary["episodes"]:
-        print(f"warning: workers reported {kept} episodes but {summary['episodes']} were merged")
+    res = record(seeds, args.out, args.workers, skills, args.popped, _spec_path(args.spec), args.size)
+    print(f"{res['episodes']} episodes ({res['frames']} frames) in {args.out}, {res['dropped']} failed skill calls "
+          f"dropped, {res['seconds']} s; tasks: {res['tasks']}")
+    if res["errors"]:
+        print(f"warning: {res['errors']} builds crashed; their errors are in the progress lines above")
     return 0
 
 

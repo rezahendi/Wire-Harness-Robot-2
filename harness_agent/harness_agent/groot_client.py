@@ -5,7 +5,7 @@ request {"endpoint": "get_action", "data": {"observation": ..., "options": None}
 reply [action_dict, info_dict]. This client only needs pyzmq, msgpack and msgpack-numpy,
 so the simulator does not have to share GR00T's Python environment.
 
-    client = GrootClient("127.0.0.1", 5555)
+    client = GrootClient("127.0.0.1", 5556)
     client.ping()
     actions = client.get_action(observation)     # {"motion": (1, 16, 4), "gripper": (1, 16, 1)}
 """
@@ -16,6 +16,10 @@ import time
 from typing import Any, Dict, Optional
 
 import numpy as np
+
+# GR00T's server defaults to 5555, but on NVIDIA's GPU VM images (Nebius included) the DCGM
+# host engine (nv-hostengine) already listens there, so everything here uses 5556.
+DEFAULT_PORT = 5556
 
 
 def pack(obj: Any) -> bytes:
@@ -35,7 +39,7 @@ class GrootError(RuntimeError):
 
 
 class GrootClient:
-    def __init__(self, host: str = "127.0.0.1", port: int = 5555, timeout_ms: int = 60000,
+    def __init__(self, host: str = "127.0.0.1", port: int = DEFAULT_PORT, timeout_ms: int = 60000,
                  api_token: Optional[str] = None):
         import zmq
         self._zmq = zmq

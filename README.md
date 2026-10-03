@@ -476,13 +476,16 @@ admittance controller underneath stays the same. The skill result says which con
 it (`executed_by`), and by default a retry falls back to the expert.
 
 ```bash
-python -m harness_agent.groot_data record --out data/harness_route --builds 330 --workers 14
-python -m harness_agent.groot_eval --forks F1,F2,F3 --seeds 0-19 --out eval/route_v1 --video
+python -m harness_agent.groot_data bench                     # renderer and recording speed of this machine
+python -m harness_agent.groot_data record --out data/harness_route --builds 330 --workers 7   # Ctrl-c packages, rerun resumes
+python -m harness_agent.groot_eval --forks F1,F2,F3 --seeds 0-19 --workers 4 --out eval/route_v1 --video
 python -m harness_agent.groot_replay_server data/harness_route      # GPU-free stand-in for testing the loop
 ```
 
 The full runbook for a Nebius AI Cloud GPU VM (setup, smoke test through GR00T's server in
-replay mode, fine-tuning, closed-loop evaluation, costs) is in [`docs/groot.md`](docs/groot.md).
+replay mode, fine-tuning, closed-loop evaluation, measured times and costs) is in
+[`docs/groot.md`](docs/groot.md). The first fine-tuning run (403 demos, 6,000 steps) took
+about 80 minutes on one L40S.
 
 ## 6. Configuration and randomisation
 

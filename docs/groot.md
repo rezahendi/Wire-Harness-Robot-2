@@ -6,41 +6,54 @@ N1.7 learns level 2 for `route_fork` from the force-guided expert's demonstratio
 language-conditioned policy for every fork ("route the wire into fork F2"). The controller
 underneath and the planner above stay the same.
 
-| step | where | time | cost (on-demand, preemptible is cheaper) |
-|---|---|---|---|
-| 1. VM + setup | Nebius AI Cloud, 1x L40S | 20 min | ~$0.50 |
-| 2. smoke test (replay through GR00T's own server) | same VM | 10 min | ~$0.25 |
-| 3. record ~1,000 routing demos | same VM, CPU cores | 45-60 min | ~$1.50 |
-| 4. fine-tune GR00T N1.7 | same VM, GPU | 1-2 h | ~$2-3 |
-| 5. closed-loop evaluation, 60 trials | same VM | ~30 min | ~$0.75 |
+Measured on a preemptible 1x L40S VM (8 vCPU, 32 GiB, about $0.78/h in eu-north1):
 
-**Stop the VM whenever nothing runs.** A stopped VM costs only its disk.
+| step | time | cost |
+|---|---|---|
+| 1. VM + setup | 30 min | ~$0.40 |
+| 2. smoke test (replay through GR00T's own server) | 10 min | ~$0.15 |
+| 3. record 400 routing demos (7 workers) | ~2 h with software rendering, see [Faster recording](#faster-recording) | ~$1.60 |
+| 4. fine-tune GR00T N1.7, 6,000 steps at batch 32 | 80-85 min (1.2-1.3 steps/s) | ~$1.10 |
+| 5. closed-loop evaluation, 30 trials | see `summary.md` (wall time is printed) | <$1 |
+
+**Stop the VM whenever nothing runs.** A stopped VM costs only its disk. A preemptible VM can
+be stopped by Nebius at any time (60 s warning); its disk survives, the public IP may change.
 
 ## 1. Create the VM
 
-Nebius AI Cloud console → Compute → Virtual machines → Create:
+Nebius AI Cloud console → Compute → Virtual machines → Create (project in **eu-north1**, where
+L40S and H100 are offered):
 
-* GPU: **1x L40S** (48 GB; fine-tuning peaks around 35 GB). An H100 is faster per hour of training.
-* Preemptible: yes if offered (much cheaper; jobs below run in tmux and checkpoints are saved, so an interruption only costs time).
-* vCPUs: as many as the L40S preset offers (the demo recorder runs one build per core).
-* Boot disk: the Ubuntu 22.04 (or 24.04) image **with NVIDIA drivers / CUDA 12**, 200 GB.
-* Access: your username and the public key from WSL (`cat ~/.ssh/id_ed25519.pub`); a public IP.
+* GPU: **1x L40S** (48 GB; fine-tuning at batch 32 fits). An H100 trains faster per hour.
+* Preemptible: yes (much cheaper; everything long runs in tmux and checkpoints are saved).
+* Preset: 8 vCPU / 32 GiB (the demo recorder runs one build per vCPU).
+* Boot disk: Ubuntu 24.04 **with CUDA**, 200 GiB (each fine-tuning checkpoint is ~36 GB).
+* Access: a username and the public key from WSL (`ssh-keygen -t ed25519`, then
+  `cat ~/.ssh/id_ed25519.pub`); a public IP.
 
-Then, from WSL: `ssh <username>@<public-ip>`
+Then, from WSL: `ssh <username>@<public-ip>` and type `yes` the first time.
 
 ## 2. Code and setup (on the VM)
 
-The repo is private, so give the VM a read-only deploy key:
-
 ```bash
-ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519 && cat ~/.ssh/id_ed25519.pub
-# GitHub -> rezahendi/Wire-Harness-Robot-2 -> Settings -> Deploy keys -> Add (read-only), paste the key
-git clone git@github.com:rezahendi/Wire-Harness-Robot-2.git
-bash Wire-Harness-Robot-2/scripts/setup_groot_vm.sh          # ~15 min: system packages, ~/simenv, ~/Isaac-GR00T
-cd ~/Isaac-GR00T && uv run huggingface-cli login             # paste your Hugging Face read token
+git clone https://github.com/rezahendi/Wire-Harness-Robot-2.git   # private repo: user name + a GitHub token
+bash Wire-Harness-Robot-2/scripts/setup_groot_vm.sh                # ~15 min: packages, ~/simenv, ~/Isaac-GR00T
 ```
 
-Use `tmux` for everything long (`tmux new -s groot`; detach with Ctrl-b d, back with `tmux a -t groot`).
+GR00T N1.7's vision-language backbone, `nvidia/Cosmos-Reason2-2B`, is gated: open its page on
+huggingface.co and accept the licence, then log in with a **read** token:
+
+```bash
+cd ~/Isaac-GR00T && uv run huggingface-cli login
+```
+
+Use tmux for everything long: `tmux new -s groot` once; `Ctrl-b c` opens a new window,
+`Ctrl-b 0`/`1`/`2` switches, `Ctrl-b d` detaches, `tmux a -t groot` comes back (also after
+the SSH connection drops: whatever runs in tmux keeps running).
+
+**Port 5556.** GR00T's server defaults to 5555, but on NVIDIA's VM images the DCGM host engine
+(`nv-hostengine`) already listens there ("Address already in use"). Every command here uses
+5556, which is also this repo's default.
 
 ## 3. Smoke test: the whole loop, before any training
 
@@ -55,28 +68,57 @@ source ~/harness_env.sh
 python -m harness_agent.groot_data record --out ~/data/smoke --seeds 1000-1001 --popped 0
 python -m harness_agent.groot_data check ~/data/smoke --preview ~/data/smoke_preview.png
 
-# terminal 2 (tmux window): GR00T's server replaying the recorded set
+# window 1: GR00T's server replaying the recorded set
 cd ~/Isaac-GR00T && uv run python gr00t/eval/run_gr00t_server.py --dataset-path ~/data/smoke \
     --modality-config-path ~/Wire-Harness-Robot-2/groot/harness_config.py \
-    --embodiment-tag NEW_EMBODIMENT --execution-horizon 8 --port 5555
+    --embodiment-tag NEW_EMBODIMENT --execution-horizon 8 --port 5556
 
-# terminal 1
+# window 2
+source ~/harness_env.sh
 python -m harness_agent.groot_eval --replay-dataset ~/data/smoke --seeds 1000-1001 --forks F1,F2,F3 --out ~/eval/smoke
 ```
 
-Expected: 6/6 routed. Stop the replay server (Ctrl-c) afterwards.
+Expected: 6/6 routed (measured: 6/6, about 1 ms per chunk). Stop the replay server with Ctrl-c.
 
 ## 4. Record the training set
 
 ```bash
 source ~/harness_env.sh
-python -m harness_agent.groot_data record --out ~/data/harness_route --builds 330 --workers $(( $(nproc) - 2 ))
+python -m harness_agent.groot_data bench          # renderer and speed of this machine, 1 min
+python -m harness_agent.groot_data record --out ~/data/harness_route --builds 330 --workers 7
 python -m harness_agent.groot_data check ~/data/harness_route --preview ~/data/route_preview.png
 ```
 
 330 randomised builds give about 1,000 routing episodes (F1, F2, F3, plus re-routes of F2
 in the quarter of builds where the wire is pulled out). Seeds start at 1000, so the
-benchmark seeds 0-99 stay unseen.
+benchmark seeds 0-99 stay unseen. Every finished build prints a progress line with the
+episodes so far and the time left.
+
+* **Stop early:** Ctrl-c once. The recorder packages the episodes finished so far into the
+  dataset (about a minute) and writes `meta/stats.json`.
+* **Resume** after a preempted VM: run the same command again; finished builds are skipped.
+* **Add more data later:** record into a new folder, then combine:
+  `python -m harness_agent.groot_data merge ~/data/harness_route ~/data/harness_route2 --out ~/data/route_all`
+  (episodes recorded twice are kept once).
+
+The first set (`harness_route`, 403 episodes: F1 132, F2 146, F3 125; 12-24 s each, median
+15 s) was stopped early this way.
+
+### Faster recording
+
+`bench` prints the OpenGL renderer. If it says `llvmpipe`, the two cameras render in software
+on the CPU: on a 2-vCPU test machine that took ~290 ms per 20 Hz step for both views, against
+~65 ms for physics and control, so recording runs several times slower than it has to. The fix is
+NVIDIA's EGL library for the installed driver; check what is there first, and only install
+the package whose version matches the running driver exactly (a mismatched library breaks
+CUDA until the next reboot):
+
+```bash
+nvidia-smi --query-gpu=driver_version --format=csv,noheader
+dpkg -l | grep -E "libnvidia-(gl|compute)"
+```
+
+With the GPU rendering (`bench` names the NVIDIA GPU), physics is the only cost left.
 
 ## 5. Fine-tune GR00T N1.7
 
@@ -88,31 +130,48 @@ uv run python gr00t/experiment/launch_finetune.py \
     --embodiment-tag NEW_EMBODIMENT \
     --modality-config-path ~/Wire-Harness-Robot-2/groot/harness_config.py \
     --num-gpus 1 --output-dir ~/ckpt/route_v1 \
-    --max-steps 6000 --save-steps 2000 --global-batch-size 32 --dataloader-num-workers 8
+    --max-steps 6000 --save-steps 2000 --save-total-limit 2 \
+    --global-batch-size 32 --dataloader-num-workers 8 2>&1 | tee ~/ckpt/route_v1_train.log
 ```
 
 It tunes the projector and the diffusion action head (the vision-language backbone stays
-frozen), with GR00T's default augmentation. The first run also writes `meta/stats.json`.
+frozen), with GR00T's default augmentation. `--save-total-limit 2` keeps the disk in check:
+a checkpoint with optimizer state is ~36 GB. The recorder already wrote `meta/stats.json` in
+GR00T's format (same fingerprints), so training reuses it. Measured on the 403-episode set:
+the loss falls from ~1.2 to ~0.1-0.2 within the first 1,000 steps, 1.2-1.3 steps/s.
 
 ## 6. Serve the policy and evaluate it in closed loop
 
 ```bash
-# tmux window 2
+# window 1
 cd ~/Isaac-GR00T && uv run python gr00t/eval/run_gr00t_server.py \
-    --model-path ~/ckpt/route_v1/checkpoint-6000 --embodiment-tag NEW_EMBODIMENT --port 5555
+    --model-path ~/ckpt/route_v1/checkpoint-6000 --embodiment-tag NEW_EMBODIMENT --port 5556
 
-# tmux window 1
+# window 2
 source ~/harness_env.sh
-python -m harness_agent.groot_eval --forks F1,F2,F3 --seeds 0-19 --out ~/eval/route_v1 --video
-python -m harness_agent.groot_eval --forks F1,F2,F3 --seeds 0-19 --expert --out ~/eval/expert   # baseline
+python -m harness_agent.groot_eval --forks F1,F2,F3 --seeds 0-9 --workers 4 --out ~/eval/route_v1 --video
+python -m harness_agent.groot_eval --forks F1,F2,F3 --seeds 0-9 --workers 4 --expert --out ~/eval/expert  # baseline
 ```
 
-`summary.md` has the success rate per fork with a 95% interval, time and contact force;
-`videos/` has one clip per trial. Copy results home from WSL:
+`--workers 4` runs four trials at once against the one server: the server answers one request
+at a time (~245 ms per action chunk on the L40S), while the simulator and cameras need the
+CPU, so parallel trials keep both busy. `summary.md` has the success rate per fork with a 95%
+interval, time, contact force and the server's round-trip time; `results.jsonl` has every
+trial; `videos/` one clip per trial. Copy results home from WSL:
 
 ```bash
 scp -r <username>@<public-ip>:eval/route_v1 ~/harness_eval_route_v1
 ```
+
+## Troubleshooting
+
+| message | cause and fix |
+|---|---|
+| `Address already in use` / `no GR00T policy server at 127.0.0.1:5555` | 5555 is taken by `nv-hostengine`; use `--port 5556` on both sides |
+| `uv sync` fails on a torchcodec wheel (a Git LFS pointer, not a wheel) | `git lfs pull --include "scripts/deployment/dgpu/wheels/*"` in ~/Isaac-GR00T (the setup script does it) |
+| `GatedRepoError` for `nvidia/Cosmos-Reason2-2B` | accept the licence on its Hugging Face page, log in again |
+| `client_loop: send disconnect: Broken pipe` | the SSH connection dropped; reconnect and `tmux a -t groot`, the job kept running |
+| `No space left on device` during training | old checkpoints; keep `--save-total-limit 2`, delete smoke-test checkpoints |
 
 ## What the policy sees and does
 
