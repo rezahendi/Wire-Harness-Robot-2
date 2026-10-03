@@ -174,6 +174,28 @@ trial; `videos/` one clip per trial. Copy results home from WSL:
 scp -r <username>@<public-ip>:eval/route_v1 ~/harness_eval_route_v1
 ```
 
+## 7. GR00T inside whole builds
+
+With the policy server still running, the planner's `route_fork` calls can go to GR00T: the
+tool call becomes GR00T's instruction, and if GR00T fails, the board is cleared and the
+retry goes to the force-guided expert (`--groot-attempts all` lets GR00T take retries too).
+
+```bash
+source ~/harness_env.sh
+cd ~/Wire-Harness-Robot-2
+# one build, scripted decisions, video
+python -m harness_agent.run_build --spec harness_agent/specs/demo_3fork.yaml --planner scripted \
+    --seed 3 --randomize --groot --video
+# Nemotron decides (Token Factory key in this shell: export NEBIUS_API_KEY=...)
+python -m harness_agent.run_build --spec harness_agent/specs/demo_3fork.yaml --planner nemotron \
+    --seed 3 --randomize --groot --video
+# the recovery benchmark with GR00T routing: planner labels get "+groot"
+python -m harness_agent.benchmark --planners scripted --groot --seeds 0-4 --out ~/runs/bench
+```
+
+`report.md` lists who executed every step; the benchmark table adds "GR00T routed" (routes
+GR00T completed / routes it attempted).
+
 ## Troubleshooting
 
 | message | cause and fix |

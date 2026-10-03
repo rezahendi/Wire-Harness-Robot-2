@@ -197,6 +197,26 @@ def test_several_clients_share_one_policy_server(tmp_path):
     assert not errors and got == [(1, 16, 4)] * 15 and policy.observations == 15
 
 
+def test_route_stats_count_who_routed_and_skip_refusals():
+    from harness_agent.groot_skill import route_stats
+    calls = [{"name": "get_status", "result": {"state": {}}},
+             {"name": "route_fork", "result": {"skill": "route_fork", "ok": True, "outcome": "routed",
+                                               "executed_by": "GR00T N1.7 (fine-tuned)"}},
+             {"name": "route_fork", "result": {"skill": "route_fork", "ok": False, "outcome": "timeout",
+                                               "executed_by": "GR00T N1.7 (fine-tuned)"}},
+             {"name": "route_fork", "result": {"skill": "route_fork", "ok": False,
+                                               "outcome": "previous_fork_not_seated"}},
+             {"name": "route_fork", "result": {"skill": "route_fork", "ok": True, "outcome": "routed"}},
+             {"name": "route_fork", "result": {"error": "fork budget used up"}}]
+    assert route_stats(calls) == {"groot_routes": 2, "groot_ok": 1, "expert_routes": 1, "expert_ok": 1}
+
+
+def test_connect_runner_needs_a_server():
+    from harness_agent.groot_skill import connect_runner
+    with pytest.raises(SystemExit, match="no GR00T policy server at 127.0.0.1:5595"):
+        connect_runner("127.0.0.1:5595", timeout_ms=300)
+
+
 @pytest.mark.skipif(not os.environ.get("GROOT_REPO"), reason="set GROOT_REPO to an Isaac-GR00T checkout")
 def test_stats_are_the_ones_groot_would_compute(tmp_path):
     import sys

@@ -2,6 +2,7 @@
 
     python -m harness_agent.benchmark --planners scripted --seeds 0-4 --out runs/bench
     python -m harness_agent.benchmark --planners nemotron --seeds 0-4 --out runs/bench   # needs a key
+    python -m harness_agent.benchmark --planners scripted --groot --seeds 0-4 --out runs/bench  # GR00T routes
 
 Every build goes through the same skills and tools, and each scenario injects the same
 disturbance at the same point (see disturbances.py): a wire pulled out of a fork right
@@ -11,7 +12,8 @@ different machines) into one table.
 
 The summary reports, per planner and scenario: builds that succeeded (simulator ground
 truth), honest verdicts (the planner's final claim matched the truth), steps, robot time,
-and model tokens per build.
+and model tokens per build. With --groot, the fine-tuned GR00T policy takes each fork's first
+attempt (planner label "+groot"), the expert any retry, and the table counts GR00T's routes.
 """
 
 from __future__ import annotations
@@ -30,7 +32,7 @@ PLANNERS = ("scripted", "nemotron")
 
 
 def run_one(spec_path: str, planner: str, scenario: str, seed: int, out_dir: str, vision: bool = False,
-            model: Optional[str] = None, max_turns: int = 40, log=print) -> Dict[str, Any]:
+            model: Optional[str] = None, max_turns: int = 40, log=print, runner=None) -> Dict[str, Any]:
     from .agent import NemotronPlanner, ScriptedPlanner
     from .run_build import _jsonable, write_report
     from .session import CellSession
@@ -48,6 +50,8 @@ def run_one(spec_path: str, planner: str, scenario: str, seed: int, out_dir: str
     session = CellSession(spec, seed=seed, randomize=True, inspector=inspector,
                           inspection_dir=os.path.join(out_dir, "inspection") if inspector else None)
     scen = make_scenario(scenario, session.route)
+    if runner is not None:
+        session.skill_runners["route_fork"] = runner
     quiet = (lambda *_: None)
     t0 = time.perf_counter()
     if planner == "scripted":
@@ -60,12 +64,18 @@ def run_one(spec_path: str, planner: str, scenario: str, seed: int, out_dir: str
     result["events"] = session.events
     result["session"] = session.summary()
     result["visual_checks"] = session.visual_checks
+    routing = None
+    if runner is not None:
+        from .groot_skill import route_stats
+        routing = result["routing"] = route_stats(result.get("tool_calls"))
+        runner.close()                                   # this build's camera renderers
     with open(os.path.join(out_dir, "trace.json"), "w", encoding="utf-8") as f:
         json.dump(_jsonable(result), f, indent=1)
     write_report(os.path.join(out_dir, "report.md"), spec, result, session)
     session.close()
     u = result.get("usage") or {}
-    row = {"planner": planner if not vision else planner + "+vision", "scenario": scenario, "seed": seed,
+    label = planner + ("+vision" if vision else "") + ("+groot" if runner is not None else "")
+    row = {"planner": label, "scenario": scenario, "seed": seed,
            "success": bool(result["success"]), "claimed": result.get("claimed_success"),
            "honest": result.get("claimed_success") is not None
            and bool(result.get("claimed_success")) == bool(result["success"]),
@@ -75,7 +85,8 @@ def run_one(spec_path: str, planner: str, scenario: str, seed: int, out_dir: str
            "refused_verdicts": result.get("refused_verdicts", 0),
            "disturbances": [d["label"] for d in result.get("disturbances") or []]
            + [e["label"] for e in session.events if e.get("type") == "disturbance" and "after" not in e],
-           "error": result.get("error", ""), "model": result.get("model", "")}
+           "error": result.get("error", ""), "model": result.get("model", ""),
+           **({"routing": routing} if routing else {})}
     log(f"  {row['planner']:16s} {scenario:18s} seed {seed}: {'SUCCESS' if row['success'] else 'failed '} "
         f"claimed={row['claimed']} steps={row['tool_calls']} robot {row['robot_s']} s, wall {row['wall_s']} s"
         + (f"  [{row['error']}]" if row["error"] else ""))
@@ -87,8 +98,10 @@ def summarize(rows: List[Dict[str, Any]]) -> str:
     for r in rows:
         groups.setdefault((r["planner"], r["scenario"]), []).append(r)
     order = {s: k for k, s in enumerate(SCENARIOS)}
+    groot = any(r.get("routing") for r in rows)
     lines = ["| planner | scenario | builds | succeeded | honest verdicts | steps | robot time | "
-             "tokens per build |", "|---|---|---|---|---|---|---|---|"]
+             "tokens per build |" + (" GR00T routed |" if groot else ""),
+             "|---|---|---|---|---|---|---|---|" + ("---|" if groot else "")]
     for (planner, scenario), rs in sorted(groups.items(), key=lambda kv: (kv[0][0], order.get(kv[0][1], 99))):
         n = len(rs)
         ok = sum(r["success"] for r in rs)
@@ -96,9 +109,12 @@ def summarize(rows: List[Dict[str, Any]]) -> str:
         steps = sum(r["tool_calls"] for r in rs) / n
         robot = sum(r["robot_s"] or 0 for r in rs) / n
         tokens = sum(r["tokens"] for r in rs) / n
-        lines.append(f"| {planner} | {scenario} | {n} | {ok}/{n} | {honest}/{n} | {steps:.1f} | {robot:.0f} s | "
-                     f"{tokens:,.0f} |" if tokens else
-                     f"| {planner} | {scenario} | {n} | {ok}/{n} | {honest}/{n} | {steps:.1f} | {robot:.0f} s | - |")
+        line = (f"| {planner} | {scenario} | {n} | {ok}/{n} | {honest}/{n} | {steps:.1f} | {robot:.0f} s | "
+                + (f"{tokens:,.0f} |" if tokens else "- |"))
+        if groot:
+            g = [r["routing"] for r in rs if r.get("routing")]
+            line += (f" {sum(x['groot_ok'] for x in g)}/{sum(x['groot_routes'] for x in g)} |" if g else " - |")
+        lines.append(line)
     return "\n".join(lines)
 
 
@@ -115,6 +131,9 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     ap.add_argument("--include", action="append", default=[],
                     help="another benchmark folder whose results join the table (read only); repeatable")
     ap.add_argument("--table-only", action="store_true", help="run nothing, just rewrite the table")
+    ap.add_argument("--groot", nargs="?", const="", default=None, metavar="HOST:PORT",
+                    help="GR00T policy server for route_fork (default 127.0.0.1:5556); labels get '+groot'")
+    ap.add_argument("--groot-attempts", default="0", help="route_fork attempts GR00T takes: 0, 0,1 or all")
     args = ap.parse_args(list(argv) if argv is not None else None)
 
     from harness_core.render_util import choose_gl_backend
@@ -139,14 +158,19 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         with open(summary_path, encoding="utf-8") as f:
             rows = [json.loads(line) for line in f if line.strip()]
     done = {(r["planner"], r["scenario"], r["seed"]) for r in rows}
+    runner = None
+    if args.groot is not None and not args.table_only:
+        from .groot_skill import connect_runner
+        runner = connect_runner(args.groot or None, args.groot_attempts)
     for seed in ([] if args.table_only else parse_seeds(args.seeds)):
         for scenario in scenarios:
             for planner in planners:
-                label = planner + ("+vision" if args.vision else "")
+                label = planner + ("+vision" if args.vision else "") + ("+groot" if runner is not None else "")
                 if (label, scenario, seed) in done and not args.force:
                     continue
                 out_dir = os.path.join(args.out, f"{label}_{scenario}_s{seed}")
-                row = run_one(spec, planner, scenario, seed, out_dir, vision=args.vision, model=args.model)
+                row = run_one(spec, planner, scenario, seed, out_dir, vision=args.vision, model=args.model,
+                              runner=runner)
                 rows = [r for r in rows if (r["planner"], r["scenario"], r["seed"]) != (label, scenario, seed)]
                 rows.append(row)
                 with open(summary_path, "w", encoding="utf-8") as f:

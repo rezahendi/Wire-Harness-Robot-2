@@ -4,6 +4,7 @@
     python -m harness_agent.run_build --spec specs/demo_4fork.yaml --planner scripted --video
     python -m harness_agent.run_build --spec specs/demo_3fork.yaml --planner expert --seed 7 --randomize
     python -m harness_agent.run_build --spec specs/demo_3fork.yaml --planner nemotron --vision
+    python -m harness_agent.run_build --spec specs/demo_3fork.yaml --planner nemotron --groot   # GR00T routes
 
 Planners:
     nemotron   Nemotron on Nebius Token Factory decides every step (needs NEBIUS_API_KEY)
@@ -12,6 +13,10 @@ Planners:
 
 --vision adds the camera check: every inspection photographs the fixtures and a vision
 model on Token Factory gives its verdict next to perception's (images in inspection/).
+
+--groot hands route_fork to the fine-tuned GR00T N1.7 policy served at HOST:PORT (default
+127.0.0.1:5556): the planner's tool call becomes GR00T's instruction, and a failed attempt
+is retried by the force-guided expert (--groot-attempts all lets GR00T take retries too).
 """
 
 from __future__ import annotations
@@ -56,6 +61,7 @@ def run_expert(session) -> Dict[str, Any]:
 
 
 def write_report(path: str, spec, result: Dict[str, Any], session) -> None:
+    from .groot_skill import REFUSED
     lines = [f"# Build report: {spec.name} rev {spec.revision}", "",
              f"* planner: **{result['planner']}** {result.get('model') or ''}",
              f"* seed {session.seed}, randomised layout: {session.randomize}",
@@ -65,13 +71,16 @@ def write_report(path: str, spec, result: Dict[str, Any], session) -> None:
     if session.issues:
         lines += ["## Validation", ""] + [f"* {i.severity}: {i.message}" for i in session.issues] + [""]
     if result.get("tool_calls"):
-        lines += ["## Steps", "", "| # | tool | arguments | outcome | robot time |", "|---|---|---|---|---|"]
+        lines += ["## Steps", "", "| # | tool | arguments | outcome | executed by | robot time |",
+                  "|---|---|---|---|---|---|"]
         for k, c in enumerate(result["tool_calls"], 1):
             res = c.get("result", {})
             outcome = res.get("outcome") or ("error: " + res["error"] if "error" in res else
                                              ("done" if "recorded" in res else "ok"))
             args = {a: v for a, v in (c.get("arguments") or {}).items() if a != "report" and v is not None}
-            lines.append(f"| {k} | `{c['name']}` | {json.dumps(args) if args else ''} | {outcome} | "
+            ran = res.get("skill") and "duration_s" in res and res.get("outcome") not in REFUSED
+            who = res.get("executed_by") or ("expert" if ran else "")
+            lines.append(f"| {k} | `{c['name']}` | {json.dumps(args) if args else ''} | {outcome} | {who} | "
                          f"{c.get('sim_time', '')} s |")
         lines.append("")
     lines += ["## Planner report", "", result.get("report") or "(none)", ""]
@@ -135,6 +144,10 @@ def main(argv: Optional[list] = None) -> int:
     ap.add_argument("--vision-style", default="v3", choices=("v1", "v2", "v3"), help="camera views and question style")
     ap.add_argument("--vision-refs", default="packaged",
                     help="labelled example images: 'packaged' (default), a refs/ folder, or 'none'")
+    ap.add_argument("--groot", nargs="?", const="", default=None, metavar="HOST:PORT",
+                    help="route forks with the GR00T policy server there (default 127.0.0.1:5556)")
+    ap.add_argument("--groot-attempts", default="0",
+                    help="route_fork attempts GR00T takes: 0 (retries go to the expert), 0,1 or all")
     ap.add_argument("--out", default=None, help="output directory (default: runs/<spec>_<planner>_<seed>)")
     args = ap.parse_args(argv)
     if args.video or args.vision:
@@ -148,7 +161,8 @@ def main(argv: Optional[list] = None) -> int:
 
     spec = HarnessSpec.from_yaml(args.spec)
     name = os.path.splitext(os.path.basename(args.spec))[0]
-    out = args.out or os.path.join("runs", f"{name}_{args.planner}_{args.seed}")
+    label = args.planner + ("_groot" if args.groot is not None else "")
+    out = args.out or os.path.join("runs", f"{name}_{label}_{args.seed}")
     os.makedirs(out, exist_ok=True)
     render_drawing(spec, os.path.join(out, "drawing.png"))
     client, inspector = None, None
@@ -170,6 +184,12 @@ def main(argv: Optional[list] = None) -> int:
         print(f"  {i.severity}: {i.message}")
     if inspector is not None:
         print(f"  camera check: {inspector.describe()}")
+    runner = None
+    if args.groot is not None and session.feasible:
+        from .groot_skill import connect_runner
+        runner = connect_runner(args.groot or None, args.groot_attempts)
+        session.skill_runners["route_fork"] = runner
+        print(f"  route_fork: {runner.name} on attempts {args.groot_attempts}, the expert otherwise")
 
     from .disturbances import make_scenario
     scenario = make_scenario(args.scenario, session.route) if session.feasible else None
@@ -194,6 +214,12 @@ def main(argv: Optional[list] = None) -> int:
     result["session"] = session.summary()
     result["visual_checks"] = session.visual_checks
     result["frame_times"] = session.frame_times
+    if runner is not None:
+        from .groot_skill import route_stats
+        result["routing"] = route_stats(result.get("tool_calls"))
+        r = result["routing"]
+        print(f"  routing: GR00T {r['groot_ok']}/{r['groot_routes']} routed, expert {r['expert_ok']}/"
+              f"{r['expert_routes']}; {runner.client.calls} action chunks")
     if client is not None and not result.get("usage"):
         result["usage"] = client.usage.as_dict()
     with open(os.path.join(out, "trace.json"), "w", encoding="utf-8") as f:
@@ -210,6 +236,9 @@ def main(argv: Optional[list] = None) -> int:
           f"({result['wall_time']} s wall) -> {out}")
     if result.get("error"):
         print(f"planner error: {result['error']}")
+    if runner is not None:
+        runner.close()
+        runner.client.close()
     session.close()
     return 0 if result["success"] else 2
 

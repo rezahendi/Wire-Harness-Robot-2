@@ -13,11 +13,13 @@ planner sees an ordinary failed skill and can retry (by default the retry uses t
 
 from __future__ import annotations
 
-from typing import Any, Dict, Generator, Iterable, Optional
+from typing import Any, Dict, Generator, Iterable, List, Optional
 
 import numpy as np
 
 from . import groot_features as gf
+
+REFUSED = ("infeasible_spec", "unknown_fork", "previous_fork_not_seated")
 
 
 class GrootRunner:
@@ -94,3 +96,38 @@ class GrootRunner:
         for c in self._cams.values():
             c.close()
         self._cams.clear()
+
+
+def connect_runner(address: Optional[str] = None, attempts: str = "0", timeout_ms: int = 120000) -> GrootRunner:
+    """A runner for the GR00T policy server at HOST:PORT (default 127.0.0.1:5556).
+
+    ``attempts`` says which route_fork attempts the policy takes: "0" (the first one; a retry
+    after a failure goes to the expert), "0,1", or "all"."""
+    from .groot_client import DEFAULT_PORT, GrootClient
+    host, port = "127.0.0.1", DEFAULT_PORT
+    if address:
+        h, _, p = address.rpartition(":")
+        if p.isdigit():
+            host, port = h or host, int(p)
+        else:
+            host = address
+    client = GrootClient(host, port, timeout_ms=timeout_ms)
+    if not client.ping():
+        client.close()
+        raise SystemExit(f"no GR00T policy server at {host}:{port} (start gr00t/eval/run_gr00t_server.py "
+                         f"with --port {port})")
+    chosen = None if attempts == "all" else [int(a) for a in str(attempts).split(",") if a.strip()]
+    return GrootRunner(client, attempts=chosen)
+
+
+def route_stats(tool_calls: Optional[List[Dict[str, Any]]]) -> Dict[str, int]:
+    """route_fork calls that ran (refusals left out), by controller, and how many routed the wire."""
+    out = {"groot_routes": 0, "groot_ok": 0, "expert_routes": 0, "expert_ok": 0}
+    for c in tool_calls or []:
+        r = c.get("result") or {}
+        if c.get("name") != "route_fork" or r.get("skill") != "route_fork" or r.get("outcome") in REFUSED:
+            continue
+        who = "groot" if str(r.get("executed_by", "")).startswith("GR00T") else "expert"
+        out[f"{who}_routes"] += 1
+        out[f"{who}_ok"] += bool(r.get("ok"))
+    return out
