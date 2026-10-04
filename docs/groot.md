@@ -254,7 +254,11 @@ bash ~/Wire-Harness-Robot-2/scripts/groot_round.sh route_v3     # ~6 h; Ctrl-b d
 Defaults: 400 builds from seed 3000 (~1,250 demos), a fresh set (sets with a different state
 layout cannot be combined), 12,000 steps, `route_v2/checkpoint-12000` as the comparison.
 Change them with environment variables, e.g. `BUILDS=200 STEPS=8000 bash .../groot_round.sh
-route_v3b`; `EXTRA_TRAIN_ARGS="--tune-visual"` also fine-tunes the vision encoder. When it prints "round finished",
+route_v3b`; `EXTRA_TRAIN_ARGS="--tune-visual"` also fine-tunes the vision encoder.
+`DATASET=~/data/route_v3` trains on a packaged set without recording one (and reuses its
+`_val` set), for trying training settings on the same demos, e.g. `DATASET=~/data/route_v3
+EXTRA_TRAIN_ARGS="--state-dropout-prob 0.0" BASELINE="" bash .../groot_round.sh route_v3_sd0`.
+When it prints "round finished",
 stop the VM in the console: shutting it down from inside makes Nebius restart it and keep
 charging.
 

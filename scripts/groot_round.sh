@@ -16,7 +16,9 @@
 # from inside does not stop it: Nebius restarts it and keeps charging.)
 #
 # Settings (environment variables): BUILDS (400), SEED_START (3000), BASE (an earlier set
-# with the same state layout to add; "" by default), NOISE (1.0), HOLD (1.0), STEPS (12000),
+# with the same state layout to add; "" by default), DATASET (train on this packaged set
+# instead of recording one, e.g. ~/data/route_v3: steps 1-2 are skipped and its _val set is
+# reused), NOISE (1.0), HOLD (1.0), STEPS (12000),
 # SAVE_STEPS (3000), EXTRA_TRAIN_ARGS (e.g. "--tune-visual"), WORKERS (vCPUs - 1),
 # EVAL_SEEDS (0-19), EVAL_WORKERS (4), PORT (5556), HORIZONS ("8": action steps executed per
 # chunk, one evaluation each), BASELINE (a checkpoint evaluated on the same boards for
@@ -27,6 +29,7 @@ NAME="${1:-route_v3}"
 BUILDS="${BUILDS:-400}"
 SEED_START="${SEED_START:-3000}"          # 1000s: first set, 2000s: second; 0-99: test boards, never trained on
 BASE="${BASE:-}"
+DATASET="${DATASET:-}"
 NOISE="${NOISE:-1.0}"
 HOLD="${HOLD:-1.0}"
 STEPS="${STEPS:-12000}"
@@ -43,8 +46,11 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 GROOT_DIR="${GROOT_DIR:-$HOME/Isaac-GR00T}"
 
 NEW="$HOME/data/${NAME}_new"
-DATA="$HOME/data/$NAME"
+DATA="${DATASET:-$HOME/data/$NAME}"
 VAL="$HOME/data/${NAME}_val"
+if [ -n "$DATASET" ] && [ ! -f "$VAL/meta/info.json" ] && [ -f "${DATASET%/}_val/meta/info.json" ]; then
+    VAL="${DATASET%/}_val"                      # the expert's demos from the test boards, already recorded
+fi
 CKPT="$HOME/ckpt/$NAME"
 EVAL="$HOME/eval/$NAME"
 mkdir -p "$HOME/rounds" "$HOME/ckpt" "$HOME/eval"
@@ -58,10 +64,17 @@ say() { echo; echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 free_gb() { df -BG --output=avail "$HOME" | tail -1 | tr -dc '0-9'; }
 trap 'say "stopped (Ctrl-c); run the same command again to carry on"; exit 130' INT
 
-say "round $NAME: $BUILDS builds (seeds from $SEED_START, pushes $NOISE, hold $HOLD s), $STEPS steps"
+if [ -n "$DATASET" ]; then
+    say "round $NAME: training on $DATASET, $STEPS steps ${EXTRA_TRAIN_ARGS}"
+else
+    say "round $NAME: $BUILDS builds (seeds from $SEED_START, pushes $NOISE, hold $HOLD s), $STEPS steps"
+fi
 
 # 1. demos -----------------------------------------------------------------------------
-if [ -f "$NEW/meta/info.json" ]; then
+if [ -n "$DATASET" ]; then
+    if [ ! -f "$DATASET/meta/info.json" ]; then echo "no packaged set at $DATASET"; exit 1; fi
+    say "1/6 recording: none, training on $DATASET"
+elif [ -f "$NEW/meta/info.json" ]; then
     say "1/6 recording: done before ($NEW)"
 else
     say "1/6 recording into $NEW"
