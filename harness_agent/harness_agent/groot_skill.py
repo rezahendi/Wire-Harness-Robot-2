@@ -10,6 +10,12 @@ the wire, left it inside the fork's slot, opened the gripper and lifted clear, h
 second. Otherwise it runs into the time limit and the skill reports ``timeout``, so the
 planner sees an ordinary failed skill and can retry (by default the retry uses the expert).
 
+With ``ensemble_decay`` set, the runner asks for a new chunk every ``execute_horizon`` steps
+and executes the weighted average of every chunk that covers the current step (temporal
+ensembling, as in ACT), weight exp(-decay x the chunk's age in steps): consecutive chunks are
+independent samples of the action distribution, and averaging them steadies the motion and
+keeps the policy from hopping between plans.
+
 Along the way the runner notes how far the policy got (``self.last["milestones"]``, seconds
 after the start): the wire really in the hand, lifted above the prongs, carried over the fork
 lined up with its slot, inside the slot, released there. The evaluation turns these into a
@@ -18,7 +24,7 @@ funnel.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Generator, Iterable, List, Optional
+from typing import Any, Dict, Generator, Iterable, List, Optional, Tuple
 
 import numpy as np
 
@@ -26,14 +32,25 @@ from . import groot_features as gf
 
 REFUSED = ("infeasible_spec", "unknown_fork", "previous_fork_not_seated")
 MILESTONES = ("in_hand", "lifted", "over_slot", "inside", "released")
+TRAJECTORY_COLUMNS = ["t", "tcp_x", "tcp_y", "tcp_z", "tcp_yaw", "gripper", "fx", "fy", "fz", "slot_y", "slot_z",
+                      "inside", "a_dx", "a_dy", "a_dz", "a_dyaw", "a_grip"]
 IN_HAND_MM = 15.0       # closed gripper with a perceived wire point this close to the TCP
 OVER_SLOT_MM = 5.0      # wire in hand, crossing the fork's slot plane this close to the slot (any height)
+
+
+def ensemble_action(active: List[Tuple[int, np.ndarray]], step: int, decay: float) -> np.ndarray:
+    """Temporal ensembling: every chunk's action for ``step`` (chunks as (step asked at, chunk)),
+    averaged with weight exp(-decay x the chunk's age in steps)."""
+    ages = np.array([step - s0 for s0, _ in active], dtype=float)
+    w = np.exp(-float(decay) * ages)
+    return (w[:, None] * np.stack([np.asarray(c)[step - s0] for s0, c in active])).sum(0) / w.sum()
 
 
 class GrootRunner:
     def __init__(self, client, skills: Iterable[str] = ("route_fork",), forks: Optional[Iterable[str]] = None,
                  attempts: Optional[Iterable[int]] = (0,), execute_horizon: int = 8, max_seconds: float = 40.0,
-                 name: str = "GR00T N1.7 (fine-tuned)"):
+                 name: str = "GR00T N1.7 (fine-tuned)", ensemble_decay: Optional[float] = None,
+                 record_trajectory: bool = False):
         self.client = client
         self.skills = set(skills)
         self.forks = None if forks is None else set(forks)
@@ -41,6 +58,8 @@ class GrootRunner:
         self.execute_horizon = int(execute_horizon)
         self.max_seconds = float(max_seconds)
         self.name = name
+        self.ensemble_decay = None if ensemble_decay is None else float(ensemble_decay)
+        self.record_trajectory = bool(record_trajectory)       # per step, in self.last["trajectory"]
         self._cams: Dict[int, gf.Cameras] = {}
         self.last: Dict[str, Any] = {}
         self._state_keys: Optional[List[str]] = None     # the state keys the served model was trained with
@@ -90,16 +109,32 @@ class GrootRunner:
         t0 = float(obs["time"][0])
         grasped, inside_since = False, None
         queue: list = []
-        calls = 0
+        active: List[Tuple[int, np.ndarray]] = []          # (step it was asked at, chunk) when ensembling
+        calls = step = next_ask = 0
         reached: Dict[str, float] = {}
         self.last = {"fork": fork_id, "calls": 0, "grasped": False, "milestones": reached, "furthest": None}
+        traj: List[List[float]] = []
+        if self.record_trajectory:
+            self.last["trajectory"] = traj
+            self.last["trajectory_columns"] = TRAJECTORY_COLUMNS
         while True:
-            if not queue:
-                chunk = self._chunk(session, obs, i, text)
-                queue = list(chunk[: self.execute_horizon])
-                calls += 1
-                self.last["calls"] = calls
-            obs = yield queue.pop(0)
+            if self.ensemble_decay is None:
+                if not queue:
+                    chunk = self._chunk(session, obs, i, text)
+                    queue = list(chunk[: self.execute_horizon])
+                    calls += 1
+                action = queue.pop(0)
+            else:
+                active = [(s0, c) for s0, c in active if step - s0 < len(c)]
+                if step >= next_ask or not active:              # never run out, even with a horizon > the chunk
+                    active.append((step, self._chunk(session, obs, i, text)))
+                    next_ask = step + self.execute_horizon
+                    calls += 1
+                action = ensemble_action(active, step, self.ensemble_decay)
+            self.last["calls"] = calls
+            sent = np.asarray(action, dtype=float)
+            obs = yield action
+            step += 1
             t = float(obs["time"][0])
             opening = float(obs["gripper"][0])
             if opening < wire_d + 0.003:
@@ -108,6 +143,14 @@ class GrootRunner:
             chk = cable_crossing_in_fork(obs["cable"], obs["forks"][i], cfg.fork, bz)
             self._milestones(obs, i, opening < wire_d + 0.003, z_top, chk, cfg.fork.slot_width, opening > 0.02,
                              t - t0)
+            if self.record_trajectory:
+                tcp = obs["tcp_pos"]
+                found = bool(np.isfinite(chk["y"]))
+                traj.append([round(t - t0, 3), *(round(float(v), 4) for v in tcp), round(float(obs["tcp_yaw"][0]), 3),
+                             round(opening, 4), *(round(float(v), 2) for v in obs["wrench"][:3]),
+                             round(float(chk["y"]), 4) if found else None,
+                             round(float(chk["z"]), 4) if found else None, int(bool(chk["inside"])),
+                             *(round(float(v), 3) for v in sent)])
             if grasped and chk["inside"] and opening > 0.02 and float(obs["tcp_pos"][2]) > z_clear:
                 inside_since = t if inside_since is None else inside_since
                 if t - inside_since >= 0.5:

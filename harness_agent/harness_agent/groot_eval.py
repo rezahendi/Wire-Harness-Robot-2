@@ -111,7 +111,9 @@ def _init_worker(opts: Dict[str, Any]) -> None:
         from .groot_skill import GrootRunner
         client = GrootClient(opts["host"], opts["port"], timeout_ms=opts["timeout_ms"])
         _WORKER["runner"] = GrootRunner(client, forks=opts["forks"], attempts=None,
-                                        execute_horizon=opts["execute_horizon"], max_seconds=opts["max_seconds"])
+                                        execute_horizon=opts["execute_horizon"], max_seconds=opts["max_seconds"],
+                                        ensemble_decay=opts.get("ensemble"),
+                                        record_trajectory=bool(opts.get("trajectories")))
 
 
 def _close_worker() -> None:
@@ -128,6 +130,14 @@ def _trial(task: Tuple[int, str, Optional[int]]) -> Dict[str, Any]:
     t0 = time.perf_counter()
     try:
         row = run_trial(_WORKER["spec"], seed, fork, _WORKER["runner"], opts["video_dir"], replay_episode=episode)
+        runner = _WORKER["runner"]
+        if opts.get("traj_dir") and runner is not None and runner.last.get("trajectory") and "ok" in row:
+            os.makedirs(opts["traj_dir"], exist_ok=True)
+            path = os.path.join(opts["traj_dir"], f"{fork}_seed{seed:03d}.json")
+            with open(path, "w") as f:
+                json.dump({"columns": runner.last["trajectory_columns"], "rows": runner.last["trajectory"],
+                           "ok": row["ok"], "milestones": row.get("milestones")}, f, separators=(",", ":"))
+            row["trajectory"] = os.path.relpath(path, opts["traj_dir"] + "/..")
     except Exception as exc:                             # one broken trial must not end the evaluation
         row = {"seed": seed, "fork": fork, "error": f"{type(exc).__name__}: {exc}"}
     row["wall_s"] = round(time.perf_counter() - t0, 1)
@@ -136,7 +146,8 @@ def _trial(task: Tuple[int, str, Optional[int]]) -> Dict[str, Any]:
 
 # ------------------------------------------------------------------ report
 def summarize(rows: List[Dict[str, Any]], title: str) -> str:
-    lines = [f"# {title}", "", "| fork | trials | success | 95% interval | truth routed | median time | median max force |",
+    lines = [f"# {title}", "",
+             "| fork | trials | success | 95% interval | truth routed | median time | median max force |",
              "|---|---|---|---|---|---|---|"]
     forks = sorted({r["fork"] for r in rows if "ok" in r})
     for f in forks + ["all"]:
@@ -213,10 +224,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--spec", default="demo_3fork.yaml")
     ap.add_argument("--workers", type=int, default=1,
                     help="trials run in parallel, all asking the same policy server (try 4 on an 8-vCPU VM)")
-    ap.add_argument("--execute-horizon", type=int, default=8)
+    ap.add_argument("--execute-horizon", type=int, default=8,
+                    help="action steps executed per chunk (with --ensemble: steps between chunks)")
+    ap.add_argument("--ensemble", type=float, default=None, metavar="DECAY",
+                    help="average every chunk that covers a step, weight exp(-DECAY x age in steps), e.g. 0.1")
     ap.add_argument("--max-seconds", type=float, default=40.0)
     ap.add_argument("--timeout", type=float, default=120.0, help="seconds to wait for one answer from the server")
     ap.add_argument("--expert", action="store_true", help="run the expert on the same trials (baseline)")
+    ap.add_argument("--trajectories", action="store_true",
+                    help="save every trial's step-by-step record (tool, gripper, force, slot crossing, action) "
+                         "in <out>/trajectories/")
     ap.add_argument("--video", action="store_true", help="save an overview video of every trial")
     ap.add_argument("--replay-dataset", help="the server replays this recorded set (GR00T's --dataset-path mode or "
                                              "harness_agent.groot_replay_server): each trial selects the episode "
@@ -255,9 +272,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         workers = 1
     opts = {"spec": _spec_path(args.spec), "expert": args.expert, "host": args.host, "port": args.port,
             "timeout_ms": int(1000 * args.timeout), "forks": forks, "execute_horizon": args.execute_horizon,
-            "max_seconds": args.max_seconds, "video_dir": os.path.join(args.out, "videos") if args.video else None,
+            "max_seconds": args.max_seconds, "ensemble": args.ensemble, "trajectories": args.trajectories,
+            "traj_dir": os.path.join(args.out, "trajectories") if args.trajectories else None,
+            "video_dir": os.path.join(args.out, "videos") if args.video else None,
             "pool": workers > 1}
-    who = "expert" if args.expert else "GR00T"
+    who = "expert" if args.expert else "GR00T" + (
+        f" (chunk every {args.execute_horizon} steps, ensembled, decay {args.ensemble:g})" if args.ensemble is not None
+        else f" ({args.execute_horizon} steps per chunk)")
     print(f"{len(tasks)} trials with {who} on {workers} worker{'s' if workers > 1 else ''} -> {args.out}", flush=True)
 
     rows: List[Dict[str, Any]] = []

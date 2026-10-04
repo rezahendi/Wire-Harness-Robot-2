@@ -181,6 +181,16 @@ interval, time, contact force, how far the policy got (wire in the hand, lifted,
 slot, inside, released) and the server's round-trip time; `results.jsonl` has every trial;
 `videos/` one clip per trial.
 
+Two options change how the same checkpoint is run, without retraining:
+
+- `--execute-horizon N --ensemble DECAY` (e.g. `4 --ensemble 0.1`): a new chunk every N steps,
+  and every step executes the weighted average of all chunks that cover it, weight
+  exp(-DECAY x the chunk's age in steps) (temporal ensembling, as in ACT). Consecutive chunks
+  are separate samples of the policy; averaging them steadies the motion near the slot.
+- `--trajectories`: every trial's step-by-step record in `trajectories/<fork>_seed<NNN>.json`
+  (time, tool position and yaw, gripper opening, force, where the wire crosses the slot plane,
+  inside or not, and the action sent), for looking at what the policy does where it fails.
+
 ### Results so far
 
 Closed loop on 20 boards never used for training (59 trials; one board where the expert

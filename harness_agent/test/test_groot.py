@@ -28,6 +28,7 @@ class _Cfg:
         prong_height = 0.028
         slot_width = 0.013
         lip_radius = 0.003
+
     class wire:
         radius = 0.003
 
@@ -146,8 +147,8 @@ def test_merge_combines_sets_once_and_writes_groot_stats(tmp_path):
     assert check(str(out))["problems"] == []
     assert not more.exists() and check(str(first))["episodes"] == 2       # staging packaged, the first set kept
     extra = [json.loads(line) for line in open(out / "meta" / "harness_episodes.jsonl")]
-    assert [(e["seed"], e["target"], e["length"]) for e in extra] == [(1000, "F1", 40), (1001, "F2", 40),
-                                                                       (1002, "F3", 30)]
+    assert [(e["seed"], e["target"], e["length"]) for e in extra] == [
+        (1000, "F1", 40), (1001, "F2", 40), (1002, "F3", 30)]
     stats = json.load(open(out / "meta" / "stats.json"))
     info = json.load(open(out / "meta" / "info.json"))
     for col in ("action", "observation.state", "timestamp"):
@@ -193,6 +194,18 @@ def test_runner_sends_the_state_keys_the_served_model_knows(tmp_path):
     finally:
         client.close()
         th.join(timeout=5)
+
+
+def test_ensembling_weights_newer_chunks_more():
+    from harness_agent.groot_skill import ensemble_action
+    old = np.zeros((16, 5))
+    new = np.ones((16, 5))
+    assert np.allclose(ensemble_action([(0, old)], 3, 0.1), 0.0)
+    mixed = ensemble_action([(0, old), (8, new)], 8, 0.1)                 # ages 8 and 0
+    assert np.allclose(mixed, 1.0 / (1.0 + np.exp(-0.8)))
+    assert np.allclose(ensemble_action([(0, old), (8, new)], 8, 0.0), 0.5)  # decay 0: plain average
+    ramp = np.arange(16.0)[:, None] * np.ones((1, 5))
+    assert np.allclose(ensemble_action([(4, ramp)], 10, 0.3), 6.0)        # a chunk's own step 6
 
 
 def test_recording_resumes_and_ctrl_c_packages_what_is_done(tmp_path, monkeypatch):
