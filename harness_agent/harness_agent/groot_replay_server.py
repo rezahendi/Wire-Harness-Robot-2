@@ -34,6 +34,9 @@ class ReplayPolicy:
             self.info = json.load(f)
         with open(os.path.join(dataset, "meta", "episodes.jsonl")) as f:
             self.episodes = [json.loads(line) for line in f]
+        with open(os.path.join(dataset, "meta", "modality.json")) as f:
+            modality = json.load(f)
+        self.state_layout = [(k, v["end"] - v["start"]) for k, v in modality["state"].items()]
         self.action_horizon, self.execution_horizon = action_horizon, execution_horizon
         self.episode_index, self.step = 0, 0
         self.observations = 0
@@ -52,8 +55,14 @@ class ReplayPolicy:
         self.step = int(options.get("step_index", 0))
         return {"episode_index": self.episode_index, "episode_length": len(self.actions)}
 
-    @staticmethod
-    def check_observation(obs: Dict[str, Any]) -> None:
+    def modality_config(self) -> Dict[str, Any]:
+        """What GR00T's server reports, in the same shape: the keys of each modality."""
+        return {"video": {"modality_keys": list(gf.VIDEO_KEYS)},
+                "state": {"modality_keys": [k for k, _ in self.state_layout]},
+                "action": {"modality_keys": [k for k, _ in gf.ACTION_LAYOUT]},
+                "language": {"modality_keys": [gf.LANGUAGE_KEY]}}
+
+    def check_observation(self, obs: Dict[str, Any]) -> None:
         for m in ("video", "state", "language"):
             assert isinstance(obs.get(m), dict), f"observation needs a '{m}' dict"
         for k in gf.VIDEO_KEYS:
@@ -61,7 +70,10 @@ class ReplayPolicy:
             assert isinstance(v, np.ndarray) and v.dtype == np.uint8 and v.ndim == 5 and v.shape[-1] == 3, \
                 f"video.{k} must be uint8 (B, T, H, W, 3), got {getattr(v, 'dtype', type(v))} {getattr(v, 'shape', '')}"
             assert v.shape[1] == 1, f"video.{k}: one frame expected"
-        for k, n in gf.STATE_LAYOUT:
+        extra = sorted(set(obs["state"]) - {k for k, _ in self.state_layout})
+        assert not extra, f"state keys the model was not trained with: {extra}"
+        for k, n in self.state_layout:
+            assert k in obs["state"], f"state.{k} is missing"
             s = obs["state"][k]
             assert isinstance(s, np.ndarray) and s.dtype == np.float32 and s.shape[1:] == (1, n), \
                 f"state.{k} must be float32 (B, 1, {n}), got {getattr(s, 'dtype', type(s))} {getattr(s, 'shape', '')}"
@@ -105,7 +117,7 @@ def serve(policy: ReplayPolicy, host: str = "*", port: int = DEFAULT_PORT, max_r
                 elif ep == "get_action":
                     rep = policy.get_action(**req.get("data", {}))
                 elif ep == "get_modality_config":
-                    rep = {}
+                    rep = policy.modality_config()
                 elif ep == "kill":
                     sock.send(pack({"status": "ok"}))
                     break

@@ -181,10 +181,23 @@ interval, time, contact force, how far the policy got (wire in the hand, lifted,
 slot, inside, released) and the server's round-trip time; `results.jsonl` has every trial;
 `videos/` one clip per trial.
 
-The first model (`route_v1`, 403 demos, 6,000 steps) routed 7 of 30 trials on unseen boards
-(F1 2/10, F2 1/10, F3 4/10), each as fast as the expert (~15 s), at ~185 ms per action chunk
-with 4 workers. The videos show near misses: the wire carried but not seated, then a drift
-once the demonstrated sequence runs out. The recovery demos and the end hold address that.
+### Results so far
+
+Closed loop on 20 boards never used for training (59 trials; one board where the expert
+could not set up F3 is skipped), success = wire seated, released and cleared:
+
+| model | demos | state | steps | routed |
+|---|---|---|---|---|
+| `route_v1` | 403 | base (47) | 6,000 | 11/59 (19%) |
+| `route_v2` | 1,165 (762 with recovery pushes, end hold) | base (47) | 12,000 | 10/59 (17%); re-planning every 0.2 s: 8/59 |
+
+Successful trials take ~15 s, like the expert, at ~190 ms per action chunk with 4 workers.
+Three times the demos, recovery pushes included, changed nothing, so data volume is not the
+limit. Where `route_v1` fails (59 trials): the wire is in the hand in 35, lifted in 27, carried
+over the slot in 26, inside the slot in 11. Both losses, grasping and seating, are precision
+steps: with the base state the policy has to work out millimetre offsets from table
+coordinates and 8 wire points 8 cm apart. `route_v3` adds that geometry measured from the
+gripper (route, wire and slot keys below).
 
 Copy results home from WSL:
 
@@ -216,19 +229,22 @@ GR00T completed / routes it attempted).
 
 ## 8. A whole round, unattended
 
-`scripts/groot_round.sh` chains the steps above: record new demos (with pushes and the end
-hold), package them with the earlier set, fine-tune, serve, and evaluate on 20 test boards
-(60 trials, with the milestone funnel). Each step is skipped when its result exists, so the
-same command continues after a preempted VM. Log: `~/rounds/<name>.log`.
+`scripts/groot_round.sh` chains the steps above: record demos (with pushes and the end hold),
+package them, fine-tune, check the fit open loop (GR00T's `open_loop_eval` on training demos
+and on the expert's demos from 10 test boards), evaluate on 20 test boards (60 trials, with the
+milestone funnel), and evaluate the previous model on the same boards. Each step is skipped
+when its result exists, so the same command continues after a preempted VM. Log:
+`~/rounds/<name>.log`.
 
 ```bash
 tmux new -s round
-bash ~/Wire-Harness-Robot-2/scripts/groot_round.sh route_v2     # ~5-6 h; Ctrl-b d to leave it
+bash ~/Wire-Harness-Robot-2/scripts/groot_round.sh route_v3     # ~6 h; Ctrl-b d to leave it
 ```
 
-Defaults: 240 new builds from seed 2000 (~700 demos), plus `~/data/harness_route`, 12,000
-steps. Change them with environment variables, e.g.
-`BUILDS=120 STEPS=8000 bash .../groot_round.sh route_v2b`. When it prints "round finished",
+Defaults: 400 builds from seed 3000 (~1,250 demos), a fresh set (sets with a different state
+layout cannot be combined), 12,000 steps, `route_v2/checkpoint-12000` as the comparison.
+Change them with environment variables, e.g. `BUILDS=200 STEPS=8000 bash .../groot_round.sh
+route_v3b`; `EXTRA_TRAIN_ARGS="--tune-visual"` also fine-tunes the vision encoder. When it prints "round finished",
 stop the VM in the console: shutting it down from inside makes Nebius restart it and keep
 charging.
 
@@ -247,8 +263,12 @@ charging.
 Defined in `harness_agent/harness_agent/groot_features.py`, matched by `groot/harness_config.py`:
 
 * video: `scene` (fixed camera over the board) and `wrist`, 256 x 256
-* state (47): TCP pose, commanded lead, gripper opening, force/torque, the target fork's CAD
-  pose and the point the wire is fixed at before it, 8 perceived wire keypoints
+* state (66): TCP pose, commanded lead, gripper opening, force/torque, the target fork's CAD
+  pose and the point the wire is fixed at before it, 8 perceived wire keypoints (the base 47,
+  all that `route_v1`/`route_v2` saw), plus geometry measured from the gripper: its position in
+  the target fork's route frame, the nearest perceived wire point in the gripper frame, and
+  where the wire crosses the slot, each coarse and fine (tanh of a 1 cm or 5 mm scale). The
+  runner asks the served model which keys it was trained with, so older checkpoints still run.
 * action (5, 20 Hz, chunks of 16, 8 executed per call): TCP step and yaw step for the
   admittance controller, gripper command
 * language: "route the wire into fork F1/F2/F3"

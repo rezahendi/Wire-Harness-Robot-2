@@ -43,6 +43,7 @@ class GrootRunner:
         self.name = name
         self._cams: Dict[int, gf.Cameras] = {}
         self.last: Dict[str, Any] = {}
+        self._state_keys: Optional[List[str]] = None     # the state keys the served model was trained with
 
     def wants(self, skill: str, target: str = "", attempt: int = 0) -> bool:
         if skill not in self.skills:
@@ -57,10 +58,21 @@ class GrootRunner:
             self._cams[key] = gf.Cameras(session.env.cell.sim.model)
         return self._cams[key]
 
-    def _chunk(self, session, obs, goal: np.ndarray, text: str) -> np.ndarray:
+    def state_keys(self) -> List[str]:
+        """Asked once from the server; models trained before the geometry keys get the base ones."""
+        if self._state_keys is None:
+            keys = self.client.modality_keys().get("state") or [k for k, _ in gf.STATE_LAYOUT]
+            known = {k for k, _ in gf.STATE_LAYOUT}
+            unknown = [k for k in keys if k not in known]
+            if unknown:
+                raise ValueError(f"the served model expects state keys this runner does not know: {unknown}")
+            self._state_keys = list(keys)
+        return self._state_keys
+
+    def _chunk(self, session, obs, i: int, text: str) -> np.ndarray:
         imgs = self.cameras(session).render(session.env.cell.sim.data)
-        state = gf.state_vector(obs, goal)
-        out = self.client.get_action(gf.observation_for_policy(imgs, state, text))
+        parts = gf.state_parts(obs, "route_fork", i, session.cfg)
+        out = self.client.get_action(gf.observation_for_policy(imgs, parts, text, self.state_keys()))
         chunk = gf.join_action({k: np.asarray(v)[0] for k, v in out.items()})
         return np.clip(chunk, -1.0, 1.0)
 
@@ -83,7 +95,7 @@ class GrootRunner:
         self.last = {"fork": fork_id, "calls": 0, "grasped": False, "milestones": reached, "furthest": None}
         while True:
             if not queue:
-                chunk = self._chunk(session, obs, gf.goal_vector(obs, "route_fork", i, cfg), text)
+                chunk = self._chunk(session, obs, i, text)
                 queue = list(chunk[: self.execute_horizon])
                 calls += 1
                 self.last["calls"] = calls

@@ -1,5 +1,6 @@
-# GR00T N1.7 modality config for the wire-harness cell (UR5e-class arm, wrist F/T sensor,
-# parallel gripper, 500 Hz admittance controller underneath).
+# GR00T N1.7 modality config for the wire-harness cell, BASE state layout (47 values, no
+# gripper-relative geometry): the layout of the first two sets and models (route_v1, route_v2).
+# New recordings use harness_config.py.
 #
 # Pass it to GR00T's fine-tuning script:
 #     --embodiment-tag NEW_EMBODIMENT --modality-config-path <repo>/groot/harness_config.py
@@ -25,12 +26,10 @@ harness_config = {
         delta_indices=[0],
         modality_keys=["scene", "wrist"],
     ),
-    # tcp pose, commanded lead, gripper, force/torque, goal fixture + fixation, 8 wire keypoints,
-    # and the geometry measured from the gripper: route frame of the target fork, nearest wire
-    # point, the wire's crossing of the slot (66 values in all)
+    # tcp pose, commanded lead, gripper, force/torque, goal fixture + fixation, 8 wire keypoints
     "state": ModalityConfig(
         delta_indices=[0],
-        modality_keys=["tcp", "command", "gripper", "wrench", "goal", "cable", "route", "wire", "slot"],
+        modality_keys=["tcp", "command", "gripper", "wrench", "goal", "cable"],
     ),
     # the cell's 5-D action: TCP step (dx dy dz, x 1 cm), yaw step (x 0.15 rad), gripper (-1 open .. +1 closed).
     # The steps are already relative to the commanded pose, so the model predicts them as they are.

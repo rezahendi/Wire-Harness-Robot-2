@@ -25,12 +25,16 @@ def fake_obs(yaw=0.3, target_yaw=0.5):
 class _Cfg:
     class fork:
         post_height = 0.015
+        prong_height = 0.028
+        slot_width = 0.013
+        lip_radius = 0.003
     class wire:
         radius = 0.003
 
 
 def test_state_vector_layout_matches_the_names_and_slices():
-    assert gf.STATE_DIM == len(gf.STATE_NAMES) == 47 and gf.ACTION_DIM == len(gf.ACTION_NAMES) == 5
+    assert gf.BASE_DIM == len(gf.BASE_NAMES) == 47 and gf.ACTION_DIM == len(gf.ACTION_NAMES) == 5
+    assert gf.STATE_DIM == len(gf.STATE_NAMES) == 66 and gf.STATE_LAYOUT[:6] == gf.BASE_LAYOUT
     obs = fake_obs(yaw=3.1, target_yaw=-3.1)                      # the yaw lead wraps around pi
     goal = gf.goal_vector(obs, "route_fork", 1, _Cfg)
     v = gf.state_vector(obs, goal)
@@ -45,40 +49,72 @@ def test_state_vector_layout_matches_the_names_and_slices():
     assert np.allclose(first[4:], obs["anchor_pos"])
 
 
+def test_geometry_is_measured_from_the_gripper():
+    obs = fake_obs(yaw=0.0)
+    obs["board_z"] = np.array([0.0])
+    obs["forks"] = np.array([[0.5, 0.0, 0.0, 0.0], [0.6, 0.0, 0.0, 0.0]])      # slots open along x
+    obs["anchor_pos"] = np.array([0.3, 0.0, 0.03])           # route to F1 runs along +x
+    obs["tcp_pos"] = np.array([0.52, 0.004, 0.05])           # 2 cm beyond F1, 4 mm to its left
+    xs = np.linspace(0.3, 0.7, 41)
+    obs["cable"] = np.stack([xs, np.full_like(xs, 0.001), np.full_like(xs, 0.035)], axis=1)  # straight, in the slot
+    parts = gf.state_parts(obs, "route_fork", 0, _Cfg)
+    r, w, sl = parts["route"], parts["wire"], parts["slot"]
+    assert np.allclose(r[:3], [0.2, 0.04, (0.05 - 0.043) / 0.1], atol=1e-5)
+    assert np.isclose(r[3], np.tanh(2.0)) and np.isclose(r[4], np.tanh(0.4)) and np.isclose(r[7], 1.0)
+    assert np.allclose(w[:3], [0.0, -0.03, -0.15], atol=1e-5)    # wire 3 mm to the right, 15 mm below
+    assert np.isclose(w[7], 1.0, atol=1e-6)                       # wire along the gripper's x axis
+    assert sl[0] == 1.0 and np.isclose(sl[1], np.tanh(0.001 / 0.005), atol=1e-4)
+    assert sl[2] < 0                                               # below the prong tops: in the slot
+    v = gf.join_state(parts)
+    assert v.shape == (gf.STATE_DIM,) and np.allclose(gf.split_state(v)["route"], r)
+    other = gf.state_parts(obs, "insert_connector", -1, _Cfg)
+    assert not other["route"].any() and not other["slot"].any()
+    base = gf.observation_for_policy({k: np.zeros((4, 4, 3), np.uint8) for k in gf.VIDEO_KEYS}, parts, "t",
+                                     [k for k, _ in gf.BASE_LAYOUT])
+    assert list(base["state"]) == [k for k, _ in gf.BASE_LAYOUT]   # what a model of the base layout gets
+
+
 def test_modality_json_matches_the_groot_config_keys():
     from harness_agent.groot_data import info_json, modality_json
     m = modality_json()
-    assert list(m["state"]) == ["tcp", "command", "gripper", "wrench", "goal", "cable"]
-    assert m["state"]["cable"] == {"start": 23, "end": 47} and m["action"]["gripper"] == {"start": 4, "end": 5}
+    assert list(m["state"]) == ["tcp", "command", "gripper", "wrench", "goal", "cable", "route", "wire", "slot"]
+    assert m["state"]["cable"] == {"start": 23, "end": 47} and m["state"]["slot"] == {"start": 63, "end": 66}
+    assert m["action"]["gripper"] == {"start": 4, "end": 5}
     assert m["annotation"] == {"human.task_description": {"original_key": "task_index"}}
+    assert list(modality_json(47)["state"]) == ["tcp", "command", "gripper", "wrench", "goal", "cable"]
     info = info_json(3, 900, 2, 256)
-    assert info["features"]["observation.state"]["shape"] == [47]
+    assert info["features"]["observation.state"]["shape"] == [66]
+    assert len(info["features"]["observation.state"]["names"]) == 66
+    assert info_json(3, 900, 2, 256, state_dim=47)["features"]["observation.state"]["shape"] == [47]
     assert info["features"]["observation.images.wrist"]["shape"] == [256, 256, 3]
     here = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
-    cfg = open(os.path.join(here, "groot", "harness_config.py")).read()
-    for key in list(m["state"]) + ["motion", "scene", "wrist", "annotation.human.task_description"]:
-        assert f'"{key}"' in cfg
+    for name, dim in (("harness_config.py", 66), ("harness_config_base.py", 47)):
+        cfg = open(os.path.join(here, "groot", name)).read()
+        keys = list(modality_json(dim)["state"])
+        assert f"modality_keys={json.dumps(keys)}" in cfg.replace("'", '"'), name
+        for key in ["motion", "scene", "wrist", "annotation.human.task_description"]:
+            assert f'"{key}"' in cfg
 
 
-def _episode(staging, seed, target, n=40, order=1):
+def _episode(staging, seed, target, n=40, order=1, width=gf.STATE_DIM):
     from harness_agent.groot_data import EpisodeBuffer, write_episode
     ep = EpisodeBuffer("route_fork", target, None)
     for t in range(n):
         for v in gf.VIDEO_KEYS:
             ep.frames[v].append(np.full((64, 64, 3), 10 * t % 255, np.uint8))
-        ep.states.append(np.full(gf.STATE_DIM, t, np.float32))
+        ep.states.append(np.full(width, t, np.float32))
         ep.actions.append(np.array([t / n, 0, 0, 0, 1 if t < n // 2 else -1], np.float32))
     write_episode(ep, os.path.join(str(staging), f"s{seed:06d}_{order:02d}"),
                   {"seed": seed, "order": order, "skill": "route_fork", "target": target, "attempt": 0,
                    "scenario": "nominal"})
 
 
-def _tiny_dataset(tmp_path, n=40):
+def _tiny_dataset(tmp_path, n=40, width=gf.STATE_DIM, name="set"):
     from harness_agent.groot_data import merge
-    staging = tmp_path / "staging"
+    staging = tmp_path / f"{name}_staging"
     for k, target in enumerate(["F1", "F2"]):
-        _episode(staging, 1000 + k, target, n)
-    out = tmp_path / "set"
+        _episode(staging, 1000 + k, target, n, width=width)
+    out = tmp_path / name
     merge(str(staging), str(out), size=64)
     return out
 
@@ -120,6 +156,43 @@ def test_merge_combines_sets_once_and_writes_groot_stats(tmp_path):
     assert len(stats["observation.state"]["mean"]) == gf.STATE_DIM and stats["action"]["max"][4] == 1.0
     with pytest.raises(SystemExit, match="already holds a dataset"):
         merge(str(first), str(out))
+
+
+def test_sets_with_different_state_layouts_are_not_merged(tmp_path):
+    from harness_agent.groot_data import check, merge
+    old = _tiny_dataset(tmp_path, width=gf.BASE_DIM, name="old")             # the first two sets: 47 values
+    new = _tiny_dataset(tmp_path, name="new")
+    assert check(str(old))["problems"] == [] and check(str(new))["problems"] == []
+    info = json.load(open(old / "meta" / "info.json"))
+    assert info["features"]["observation.state"]["shape"] == [47]
+    assert list(json.load(open(old / "meta" / "modality.json"))["state"])[-1] == "cable"
+    with pytest.raises(SystemExit, match="different state layouts"):
+        merge([str(old), str(new)], str(tmp_path / "mixed"))
+
+
+def test_runner_sends_the_state_keys_the_served_model_knows(tmp_path):
+    from harness_agent.groot_client import GrootClient, GrootError
+    from harness_agent.groot_replay_server import ReplayPolicy, serve
+    from harness_agent.groot_skill import GrootRunner
+    old = _tiny_dataset(tmp_path, width=gf.BASE_DIM, name="old")
+    port = 5596
+    th = threading.Thread(target=serve, args=(ReplayPolicy(str(old)),), kwargs={"host": "127.0.0.1", "port": port},
+                          daemon=True)
+    th.start()
+    client = GrootClient("127.0.0.1", port, timeout_ms=5000)
+    try:
+        runner = GrootRunner(client)
+        base = [k for k, _ in gf.BASE_LAYOUT]
+        assert runner.state_keys() == base
+        imgs = {k: np.zeros((256, 256, 3), np.uint8) for k in gf.VIDEO_KEYS}
+        parts = gf.split_state(np.zeros(gf.STATE_DIM, np.float32))
+        assert client.get_action(gf.observation_for_policy(imgs, parts, "route the wire into fork F1", base))
+        with pytest.raises(GrootError, match="not trained with"):                # all 9 keys: refused
+            client.get_action(gf.observation_for_policy(imgs, parts, "route the wire into fork F1"))
+        client.call("kill")
+    finally:
+        client.close()
+        th.join(timeout=5)
 
 
 def test_recording_resumes_and_ctrl_c_packages_what_is_done(tmp_path, monkeypatch):
@@ -234,6 +307,17 @@ def test_connect_runner_needs_a_server():
 
 
 @pytest.mark.skipif(not os.environ.get("GROOT_REPO"), reason="set GROOT_REPO to an Isaac-GR00T checkout")
+def test_modality_keys_are_read_from_groots_reply():
+    sc = _groot_server_client()
+    MsgSerializer, ModalityConfig = sc.MsgSerializer, sc.ModalityConfig
+    from harness_agent.groot_client import modality_keys_from, unpack
+    keys = ["tcp", "command", "gripper", "wrench", "goal", "cable", "route", "wire", "slot"]
+    reply = MsgSerializer.to_bytes({"state": ModalityConfig(delta_indices=[0], modality_keys=keys),
+                                    "video": ModalityConfig(delta_indices=[0], modality_keys=["scene", "wrist"])})
+    assert modality_keys_from(unpack(reply)) == {"state": keys, "video": ["scene", "wrist"]}
+
+
+@pytest.mark.skipif(not os.environ.get("GROOT_REPO"), reason="set GROOT_REPO to an Isaac-GR00T checkout")
 def test_stats_are_the_ones_groot_would_compute(tmp_path):
     import sys
     sys.path.insert(0, os.environ["GROOT_REPO"])
@@ -281,23 +365,31 @@ def test_client_talks_to_a_replay_server_like_groot(tmp_path):
         th.join(timeout=5)
 
 
-@pytest.mark.skipif(not os.environ.get("GROOT_REPO"), reason="set GROOT_REPO to an Isaac-GR00T checkout")
-def test_payloads_survive_groots_own_serializer():
+def _groot_server_client():
+    """GR00T's server_client module from the checkout in GROOT_REPO, without importing torch."""
     import importlib.util
     import sys
     import types
     repo = os.environ["GROOT_REPO"]
-    sys.path.insert(0, repo)
-    pkg = types.ModuleType("gr00t.policy")
-    pkg.__path__ = [os.path.join(repo, "gr00t", "policy")]
-    sys.modules.setdefault("gr00t.policy", pkg)
-    for name in ("policy", "server_client"):
-        spec = importlib.util.spec_from_file_location(f"gr00t.policy.{name}", os.path.join(repo, "gr00t", "policy", f"{name}.py"))
-        mod = importlib.util.module_from_spec(spec)
-        sys.modules[f"gr00t.policy.{name}"] = mod
-        spec.loader.exec_module(mod)
+    if repo not in sys.path:
+        sys.path.insert(0, repo)
+    if "gr00t.policy.server_client" not in sys.modules:
+        pkg = types.ModuleType("gr00t.policy")
+        pkg.__path__ = [os.path.join(repo, "gr00t", "policy")]
+        sys.modules.setdefault("gr00t.policy", pkg)
+        for name in ("policy", "server_client"):
+            spec = importlib.util.spec_from_file_location(f"gr00t.policy.{name}",
+                                                          os.path.join(repo, "gr00t", "policy", f"{name}.py"))
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules[f"gr00t.policy.{name}"] = mod
+            spec.loader.exec_module(mod)
+    return sys.modules["gr00t.policy.server_client"]
+
+
+@pytest.mark.skipif(not os.environ.get("GROOT_REPO"), reason="set GROOT_REPO to an Isaac-GR00T checkout")
+def test_payloads_survive_groots_own_serializer():
     from harness_agent.groot_client import pack, unpack
-    ser = sys.modules["gr00t.policy.server_client"].MsgSerializer
+    ser = _groot_server_client().MsgSerializer
     obs = gf.observation_for_policy({k: np.ones((256, 256, 3), np.uint8) for k in gf.VIDEO_KEYS},
                                     np.arange(gf.STATE_DIM, dtype=np.float32), "route the wire into fork F1")
     got = ser.from_bytes(pack({"endpoint": "get_action", "data": {"observation": obs}}))["data"]["observation"]

@@ -12,8 +12,9 @@ so the simulator does not have to share GR00T's Python environment.
 
 from __future__ import annotations
 
+import json
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 
@@ -36,6 +37,22 @@ def unpack(data: bytes) -> Any:
 
 class GrootError(RuntimeError):
     pass
+
+
+def modality_keys_from(cfg: Any) -> Dict[str, List[str]]:
+    """Keys per modality from a get_modality_config reply: GR00T sends each ModalityConfig as
+    {"__ModalityConfig__": True, "as_json": {...}}, the replay server a plain dict."""
+    out: Dict[str, List[str]] = {}
+    if not isinstance(cfg, dict):
+        return out
+    for name, mc in cfg.items():
+        payload = mc.get("as_json", mc) if isinstance(mc, dict) else None
+        if isinstance(payload, (bytes, str)):
+            payload = json.loads(payload)
+        keys = payload.get("modality_keys") if isinstance(payload, dict) else None
+        if keys:
+            out[name.decode() if isinstance(name, bytes) else str(name)] = [str(k) for k in keys]
+    return out
 
 
 class GrootClient:
@@ -84,6 +101,13 @@ class GrootClient:
             return bool(self.call("ping"))
         except GrootError:
             return False
+
+    def modality_keys(self) -> Dict[str, List[str]]:
+        """The keys the served model expects per modality ({} when the server does not say)."""
+        try:
+            return modality_keys_from(self.call("get_modality_config"))
+        except GrootError:
+            return {}
 
     def reset(self, options: Optional[Dict[str, Any]] = None) -> Any:
         return self.call("reset", {"options": options})

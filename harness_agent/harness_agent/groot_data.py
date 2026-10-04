@@ -76,8 +76,8 @@ def _spec_path(name: str) -> str:
 
 # ---------------------------------------------------------------- recording
 class EpisodeBuffer:
-    def __init__(self, skill: str, target: str, goal_fn):
-        self.skill, self.target, self.goal_fn = skill, target, goal_fn
+    def __init__(self, skill: str, target: str, state_fn):
+        self.skill, self.target, self.state_fn = skill, target, state_fn       # state_fn(obs) -> vector
         self.text = gf.instruction(skill, target)
         self.frames: Dict[str, List[np.ndarray]] = {k: [] for k in gf.VIDEO_KEYS}
         self.states: List[np.ndarray] = []
@@ -167,11 +167,11 @@ def make_recording_session(spec, seed: int, randomize: bool, skills: Sequence[st
             imgs = self._cams.render(self.env.cell.sim.data)
             for k in gf.VIDEO_KEYS:
                 ep.frames[k].append(imgs[k])
-            ep.states.append(gf.state_vector(obs, ep.goal_fn(obs)))
+            ep.states.append(ep.state_fn(obs))
             ep.actions.append(np.clip(np.asarray(action, dtype=np.float32).reshape(5), -1.0, 1.0))
 
-        def _record(self, skill: str, target: str, goal_fn, run):
-            self._ep = EpisodeBuffer(skill, target, goal_fn)
+        def _record(self, skill: str, target: str, state_fn, run):
+            self._ep = EpisodeBuffer(skill, target, state_fn)
             if self._noise is not None:
                 self._noise.reset()
                 self.action_noise = self._noise
@@ -202,7 +202,7 @@ def make_recording_session(spec, seed: int, randomize: bool, skills: Sequence[st
                 return super().route_fork(fork_id, attempt, pick_offset_mm)
             cfg = self.cfg
             return self._record("route_fork", fork_id,
-                                lambda obs: gf.goal_vector(obs, "route_fork", i, cfg),
+                                lambda obs: gf.join_state(gf.state_parts(obs, "route_fork", i, cfg)),
                                 lambda: super(DemoSession, self).route_fork(fork_id, attempt, pick_offset_mm))
 
         def insert_connector(self):
@@ -210,7 +210,7 @@ def make_recording_session(spec, seed: int, randomize: bool, skills: Sequence[st
                 return super().insert_connector()
             cfg = self.cfg
             return self._record("insert_connector", self.connector_id,
-                                lambda obs: gf.goal_vector(obs, "insert_connector", -1, cfg),
+                                lambda obs: gf.join_state(gf.state_parts(obs, "insert_connector", -1, cfg)),
                                 lambda: super(DemoSession, self).insert_connector())
 
         def close(self):
@@ -404,8 +404,8 @@ def record(seeds: Sequence[int], out: str, workers: int, skills: Sequence[str], 
 
 
 # ------------------------------------------------------------------- merge
-def modality_json() -> Dict[str, Any]:
-    st = gf.layout_slices(gf.STATE_LAYOUT)
+def modality_json(state_dim: int = gf.STATE_DIM) -> Dict[str, Any]:
+    st = gf.layout_slices(gf.layout_for_width(state_dim))
     ac = gf.layout_slices(gf.ACTION_LAYOUT)
     return {
         "state": {k: {"start": a, "end": b} for k, (a, b) in st.items()},
@@ -415,7 +415,8 @@ def modality_json() -> Dict[str, Any]:
     }
 
 
-def info_json(total_episodes: int, total_frames: int, total_tasks: int, size: int, fps: int = gf.FPS) -> Dict[str, Any]:
+def info_json(total_episodes: int, total_frames: int, total_tasks: int, size: int, fps: int = gf.FPS,
+              state_dim: int = gf.STATE_DIM) -> Dict[str, Any]:
     def video(k):
         return {"dtype": "video", "shape": [size, size, 3], "names": ["height", "width", "channels"],
                 "info": {"video.height": size, "video.width": size, "video.codec": "h264",
@@ -433,7 +434,8 @@ def info_json(total_episodes: int, total_frames: int, total_tasks: int, size: in
         "video_path": "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4",
         "features": {
             "action": {"dtype": "float32", "shape": [gf.ACTION_DIM], "names": gf.ACTION_NAMES},
-            "observation.state": {"dtype": "float32", "shape": [gf.STATE_DIM], "names": gf.STATE_NAMES},
+            "observation.state": {"dtype": "float32", "shape": [state_dim],
+                                  "names": gf.STATE_NAMES_BY_WIDTH[state_dim]},
             **{f"observation.images.{k}": video(k) for k in gf.VIDEO_KEYS},
             "timestamp": scalar("float32"), "frame_index": scalar("int64"), "episode_index": scalar("int64"),
             "index": scalar("int64"), "task_index": scalar("int64"),
@@ -538,8 +540,12 @@ def merge(sources: Union[str, Sequence[str]], out: str, size: Optional[int] = No
     staged: List[str] = []
     seen: set = set()
     duplicates = 0
+    widths: Dict[str, int] = {}                          # state width per source: sets must not mix layouts
     for src in sources:
         kind, found, src_size = episodes_in(src)
+        if found:
+            first = pq.read_table(found[0]["parquet"], columns=["observation.state"]).to_pydict()["observation.state"]
+            widths[src] = len(first[0]) if first else gf.STATE_DIM
         if src_size is not None:
             if size is None:
                 size = src_size
@@ -557,6 +563,11 @@ def merge(sources: Union[str, Sequence[str]], out: str, size: Optional[int] = No
         if kind == "staging" and not keep_staging:
             staged.append(os.path.join(src, "staging") if os.path.isdir(os.path.join(src, "staging")) else src)
     size = size or gf.IMAGE_SIZE
+    state_dims = sorted(set(widths.values()))
+    if len(state_dims) > 1:
+        raise SystemExit(f"these sets have different state layouts ({', '.join(map(str, state_dims))} values: "
+                         f"{widths}); record them again with the same code to combine them")
+    state_dim = state_dims[0] if state_dims else gf.STATE_DIM
     tasks = sorted({it["meta"]["task"] for it in items})
     os.makedirs(os.path.join(out, "meta"), exist_ok=True)
     index = 0
@@ -589,9 +600,9 @@ def merge(sources: Union[str, Sequence[str]], out: str, size: Optional[int] = No
     with open(os.path.join(meta, "tasks.jsonl"), "w") as f:
         f.writelines(json.dumps({"task_index": i, "task": t}) + "\n" for i, t in enumerate(tasks))
     with open(os.path.join(meta, "modality.json"), "w") as f:
-        json.dump(modality_json(), f, indent=2)
+        json.dump(modality_json(state_dim), f, indent=2)
     with open(os.path.join(meta, "info.json"), "w") as f:
-        json.dump(info_json(len(episodes), index, len(tasks), size), f, indent=2)
+        json.dump(info_json(len(episodes), index, len(tasks), size, state_dim=state_dim), f, indent=2)
     with open(os.path.join(meta, "harness_episodes.jsonl"), "w") as f:
         f.writelines(json.dumps(e) + "\n" for e in extra)
     write_stats(out)
@@ -621,8 +632,9 @@ def check(dataset: str, preview: Optional[str] = None) -> Dict[str, Any]:
         n = len(t["action"])
         if n != e["length"]:
             problems.append(f"episode {i}: parquet has {n} rows, episodes.jsonl says {e['length']}")
-        if any(len(s) != gf.STATE_DIM for s in t["observation.state"][:3]):
-            problems.append(f"episode {i}: state width is not {gf.STATE_DIM}")
+        width = info["features"]["observation.state"]["shape"][0]
+        if any(len(s) != width for s in t["observation.state"][:3]):
+            problems.append(f"episode {i}: state width is not {width}")
         a = np.asarray(t["action"], dtype=np.float32)
         act_min, act_max = np.minimum(act_min, a.min(0)), np.maximum(act_max, a.max(0))
         for k in gf.VIDEO_KEYS:
