@@ -258,6 +258,17 @@ route_v3b`; `EXTRA_TRAIN_ARGS="--tune-visual"` also fine-tunes the vision encode
 stop the VM in the console: shutting it down from inside makes Nebius restart it and keep
 charging.
 
+`scripts/groot_evals.sh` then runs the trained checkpoint in other ways on the same boards, no
+retraining (~2 h, `~/eval/<name>_<variant>`): `ens4` (a chunk every 4 steps, ensembled, with
+trajectories), `restarts` (up to 2 fresh starts after a stalled try, 60 s), `best` (both, with
+videos) and `steps8` (8 denoising steps instead of 4: a copy of `config.json` next to links to
+the weights).
+
+```bash
+tmux new -s evals
+bash ~/Wire-Harness-Robot-2/scripts/groot_evals.sh route_v3
+```
+
 ## Troubleshooting
 
 | message | cause and fix |
