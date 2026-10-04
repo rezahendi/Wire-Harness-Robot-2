@@ -148,6 +148,10 @@ def main(argv: Optional[list] = None) -> int:
                     help="route forks with the GR00T policy server there (default 127.0.0.1:5556)")
     ap.add_argument("--groot-attempts", default="0",
                     help="route_fork attempts GR00T takes: 0 (retries go to the expert), 0,1 or all")
+    ap.add_argument("--groot-restarts", type=int, default=0,
+                    help="within one attempt, GR00T starts over after a stalled try up to N times (try 2)")
+    ap.add_argument("--groot-seconds", type=float, default=None,
+                    help="time limit of one GR00T attempt (default 40 s, 60 s with restarts)")
     ap.add_argument("--out", default=None, help="output directory (default: runs/<spec>_<planner>_<seed>)")
     args = ap.parse_args(argv)
     if args.video or args.vision:
@@ -187,7 +191,8 @@ def main(argv: Optional[list] = None) -> int:
     runner = None
     if args.groot is not None and session.feasible:
         from .groot_skill import connect_runner
-        runner = connect_runner(args.groot or None, args.groot_attempts)
+        runner = connect_runner(args.groot or None, args.groot_attempts, restarts=args.groot_restarts,
+                                max_seconds=args.groot_seconds or (60.0 if args.groot_restarts else 40.0))
         session.skill_runners["route_fork"] = runner
         print(f"  route_fork: {runner.name} on attempts {args.groot_attempts}, the expert otherwise")
 

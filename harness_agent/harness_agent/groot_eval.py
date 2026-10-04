@@ -75,6 +75,8 @@ def run_trial(spec, seed: int, fork: str, runner, video_dir: Optional[str] = Non
             out.update({"milestones": dict(runner.last.get("milestones") or {}),
                         "furthest": runner.last.get("furthest"),
                         "fork_distance_mm": runner.last.get("fork_distance_mm")})
+            if runner.restarts:
+                out.update({"tries": runner.last.get("tries", 1), "stalls": list(runner.last.get("stalls") or [])})
         if video_dir is not None and session.frames:
             import imageio
             os.makedirs(video_dir, exist_ok=True)
@@ -113,7 +115,8 @@ def _init_worker(opts: Dict[str, Any]) -> None:
         _WORKER["runner"] = GrootRunner(client, forks=opts["forks"], attempts=None,
                                         execute_horizon=opts["execute_horizon"], max_seconds=opts["max_seconds"],
                                         ensemble_decay=opts.get("ensemble"),
-                                        record_trajectory=bool(opts.get("trajectories")))
+                                        record_trajectory=bool(opts.get("trajectories")),
+                                        restarts=int(opts.get("restarts") or 0))
 
 
 def _close_worker() -> None:
@@ -168,6 +171,16 @@ def summarize(rows: List[Dict[str, Any]], title: str) -> str:
     if errors:
         lines += ["", f"{len(errors)} trials crashed, first: seed {errors[0]['seed']} {errors[0]['fork']}: "
                       f"{errors[0]['error']}"]
+    tried = [r for r in rows if r.get("tries", 1) > 1]
+    if any("tries" in r for r in rows):
+        why: Dict[str, int] = {}
+        for r in tried:
+            for st in r.get("stalls", []):
+                key = st["why"].split(" for ")[0]
+                why[key] = why.get(key, 0) + 1
+        lines += ["", f"Restarts: {len(tried)} trials started over ({sum(r['tries'] - 1 for r in tried)} restarts: "
+                      + (", ".join(f"{k} {v}" for k, v in sorted(why.items(), key=lambda x: -x[1])) or "none")
+                      + f"); {sum(r['ok'] for r in tried)} of them routed the wire on a later try."]
     fails: Dict[str, int] = {}
     for r in rows:
         if "ok" in r and not r["ok"]:
@@ -229,6 +242,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--ensemble", type=float, default=None, metavar="DECAY",
                     help="average every chunk that covers a step, weight exp(-DECAY x age in steps), e.g. 0.1")
     ap.add_argument("--max-seconds", type=float, default=40.0)
+    ap.add_argument("--restarts", type=int, default=0,
+                    help="after a stalled try (let go outside the slot, no progress for 12 s) open the gripper, "
+                         "lift the tool and let the policy start over, up to N times within --max-seconds "
+                         "(try --restarts 2 --max-seconds 60)")
     ap.add_argument("--timeout", type=float, default=120.0, help="seconds to wait for one answer from the server")
     ap.add_argument("--expert", action="store_true", help="run the expert on the same trials (baseline)")
     ap.add_argument("--trajectories", action="store_true",
@@ -273,12 +290,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     opts = {"spec": _spec_path(args.spec), "expert": args.expert, "host": args.host, "port": args.port,
             "timeout_ms": int(1000 * args.timeout), "forks": forks, "execute_horizon": args.execute_horizon,
             "max_seconds": args.max_seconds, "ensemble": args.ensemble, "trajectories": args.trajectories,
+            "restarts": args.restarts,
             "traj_dir": os.path.join(args.out, "trajectories") if args.trajectories else None,
             "video_dir": os.path.join(args.out, "videos") if args.video else None,
             "pool": workers > 1}
     who = "expert" if args.expert else "GR00T" + (
         f" (chunk every {args.execute_horizon} steps, ensembled, decay {args.ensemble:g})" if args.ensemble is not None
-        else f" ({args.execute_horizon} steps per chunk)")
+        else f" ({args.execute_horizon} steps per chunk)") + (
+        f", up to {args.restarts} restarts in {args.max_seconds:g} s" if args.restarts else "")
     print(f"{len(tasks)} trials with {who} on {workers} worker{'s' if workers > 1 else ''} -> {args.out}", flush=True)
 
     rows: List[Dict[str, Any]] = []

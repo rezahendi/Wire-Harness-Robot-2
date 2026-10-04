@@ -208,6 +208,46 @@ def test_ensembling_weights_newer_chunks_more():
     assert np.allclose(ensemble_action([(4, ramp)], 10, 0.3), 6.0)        # a chunk's own step 6
 
 
+def test_a_stalled_try_is_cleared_and_started_over(monkeypatch):
+    from harness_agent.groot_skill import GrootRunner
+
+    class FakeSession:
+        cfg, route = _Cfg, ["F1"]
+
+        def __init__(self):
+            self.cleared = []
+            self.obs = dict(fake_obs(yaw=0.0), board_z=np.array([0.0]), time=np.array([0.0]),
+                            forks=np.array([[0.5, 0.0, 0.0, 0.0]]), gripper=np.array([0.06]),
+                            tcp_pos=np.array([0.2, 0.2, 0.2]))           # on the wire (the 0..1 diagonal)
+
+        def _clear_board(self):
+            self.cleared.append(float(self.obs["time"][0]))
+            yield np.zeros(5)
+            return True
+
+    def run(gripper_at, seconds, restarts):
+        session = FakeSession()
+        runner = GrootRunner(client=None, restarts=restarts)
+        monkeypatch.setattr(runner, "_chunk", lambda *a: np.zeros((16, 5), np.float32))
+        gen = runner.route_fork(session, 0)
+        next(gen)
+        for k in range(int(round(seconds / 0.05))):
+            t = (k + 1) * 0.05
+            session.obs = dict(session.obs, time=np.array([t]), gripper=np.array([gripper_at(t)]))
+            gen.send(session.obs)
+        gen.close()
+        return runner, session
+
+    runner, session = run(lambda t: 0.06, 30.0, restarts=1)       # never does anything: one restart, no more
+    assert runner.last["tries"] == 2 and len(session.cleared) == 1
+    assert runner.last["stalls"][0]["why"] == "no progress for 12 s" and abs(session.cleared[0] - 12.0) < 0.1
+    runner, session = run(lambda t: 0.005 if t < 1.0 else 0.06, 10.0, restarts=2)   # grasps, then lets go
+    assert runner.last["milestones"].get("in_hand") is not None
+    assert runner.last["stalls"][0]["why"] == "let go outside the slot" and abs(session.cleared[0] - 3.0) < 0.1
+    runner, session = run(lambda t: 0.06, 30.0, restarts=0)       # the default: no restarts
+    assert runner.last["tries"] == 1 and not session.cleared
+
+
 def test_recording_resumes_and_ctrl_c_packages_what_is_done(tmp_path, monkeypatch):
     from harness_agent import groot_data as gd
     calls = []
