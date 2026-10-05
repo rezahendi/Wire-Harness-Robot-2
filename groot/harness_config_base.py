@@ -1,6 +1,6 @@
 # GR00T N1.7 modality config for the wire-harness cell, BASE state layout (47 values, no
 # gripper-relative geometry): the layout of the first two sets and models (route_v1, route_v2).
-# New recordings use harness_config.py.
+# New recordings use harness_config.py (v4); route_v3: harness_config_v3.py.
 #
 # Pass it to GR00T's fine-tuning script:
 #     --embodiment-tag NEW_EMBODIMENT --modality-config-path <repo>/groot/harness_config.py

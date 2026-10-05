@@ -23,6 +23,14 @@ The policy gets the same information as the force-guided expert (no simulator gr
            slot     where the wire crosses the target slot's plane: found,     3
                     lateral offset (tanh of /5 mm), depth below the prong tops
                     (tanh of /1 cm)
+           pick     the planned grasp point on the wire (the expert's plan:    8
+                    enough wire from the fixation to carry it over the fork) in
+                    the gripper frame, coarse and fine, and the wire direction
+                    there against the gripper yaw (sin/cos of twice the angle)
+           seat     the wire's pull on the tool along the route (/10 N, tanh   5
+                    of /5 N), the tool height against the planned seating height
+                    (tanh of /1 cm), and how far past the fork the tool is against
+                    the planned holding distance (/10 cm, tanh of /1 cm)
     action motion   TCP step dx dy dz (x 1 cm) and yaw step (x 0.15 rad)        4
            gripper  -1 open ... +1 closed                                       1
     language        "route the wire into fork F2" / "insert the connector into its holder"
@@ -33,8 +41,12 @@ produces; the 500 Hz admittance controller underneath is unchanged.
 The route, wire and slot keys (added after the first two models, which used the first 47
 values only) give the policy the millimetre offsets it needs for grasping and seating
 directly, instead of leaving it to subtract table coordinates. They come from the same
-perception the expert uses. Recordings store all 66 values; the runner sends a served model
-exactly the keys it was trained with.
+perception the expert uses. The pick and seat keys (layout v4, 79 values) add the expert's
+plan, made once at the start of the skill from the same perception (harness_core.expert.
+plan_route): where on the wire to grasp, and where to hold it while seating. A policy
+trained without them grasped wherever the wire lay on average and pressed too close to the
+fork. Recordings store every value of their layout; the runner sends a served model exactly
+the keys it was trained with.
 """
 
 from __future__ import annotations
@@ -46,12 +58,15 @@ import numpy as np
 BASE_LAYOUT: List[Tuple[str, int]] = [("tcp", 5), ("command", 4), ("gripper", 1), ("wrench", 6),
                                       ("goal", 7), ("cable", 24)]
 GEOMETRY_LAYOUT: List[Tuple[str, int]] = [("route", 8), ("wire", 8), ("slot", 3)]
-STATE_LAYOUT: List[Tuple[str, int]] = BASE_LAYOUT + GEOMETRY_LAYOUT      # what recordings store
+PLAN_LAYOUT: List[Tuple[str, int]] = [("pick", 8), ("seat", 5)]
+V3_LAYOUT: List[Tuple[str, int]] = BASE_LAYOUT + GEOMETRY_LAYOUT
+STATE_LAYOUT: List[Tuple[str, int]] = V3_LAYOUT + PLAN_LAYOUT           # what recordings store (v4)
 ACTION_LAYOUT: List[Tuple[str, int]] = [("motion", 4), ("gripper", 1)]
 BASE_DIM = sum(n for _, n in BASE_LAYOUT)
+V3_DIM = sum(n for _, n in V3_LAYOUT)
 STATE_DIM = sum(n for _, n in STATE_LAYOUT)
 ACTION_DIM = sum(n for _, n in ACTION_LAYOUT)
-STATE_LAYOUTS = {BASE_DIM: BASE_LAYOUT, STATE_DIM: STATE_LAYOUT}         # by width, for older sets
+STATE_LAYOUTS = {BASE_DIM: BASE_LAYOUT, V3_DIM: V3_LAYOUT, STATE_DIM: STATE_LAYOUT}   # by width, older sets too
 CABLE_POINTS = 8
 IMAGE_SIZE = 256
 VIDEO_KEYS = ("scene", "wrist")
@@ -63,12 +78,15 @@ BASE_NAMES = (["tcp.x", "tcp.y", "tcp.z", "tcp.sin_yaw", "tcp.cos_yaw",
                "wrench.fx", "wrench.fy", "wrench.fz", "wrench.tx", "wrench.ty", "wrench.tz",
                "goal.x", "goal.y", "goal.sin_yaw", "goal.cos_yaw", "goal.fix_x", "goal.fix_y", "goal.fix_z"]
               + [f"cable.{k}.{a}" for k in range(CABLE_POINTS) for a in "xyz"])
-STATE_NAMES = BASE_NAMES + [
+V3_NAMES = BASE_NAMES + [
     "route.along", "route.lateral", "route.height", "route.along_fine", "route.lateral_fine",
     "route.height_fine", "route.sin_dyaw", "route.cos_dyaw",
     "wire.x", "wire.y", "wire.z", "wire.x_fine", "wire.y_fine", "wire.z_fine", "wire.sin2_dyaw", "wire.cos2_dyaw",
     "slot.found", "slot.lateral_fine", "slot.depth_fine"]
-STATE_NAMES_BY_WIDTH = {BASE_DIM: BASE_NAMES, STATE_DIM: STATE_NAMES}
+STATE_NAMES = V3_NAMES + [
+    "pick.x", "pick.y", "pick.z", "pick.x_fine", "pick.y_fine", "pick.z_fine", "pick.sin2_dyaw", "pick.cos2_dyaw",
+    "seat.pull", "seat.pull_fine", "seat.height_fine", "seat.beyond", "seat.beyond_fine"]
+STATE_NAMES_BY_WIDTH = {BASE_DIM: BASE_NAMES, V3_DIM: V3_NAMES, STATE_DIM: STATE_NAMES}
 ACTION_NAMES = ["motion.dx", "motion.dy", "motion.dz", "motion.dyaw", "gripper"]
 
 
@@ -162,14 +180,50 @@ def geometry_features(obs: Dict[str, np.ndarray], fork_index: int, cfg) -> Dict[
             "slot": np.asarray(slot, np.float32)}
 
 
-def state_parts(obs: Dict[str, np.ndarray], skill: str, fork_index: int, cfg) -> Dict[str, np.ndarray]:
-    """Every state key, by name: the base 47 values and the gripper-relative geometry (zeros
-    for skills other than route_fork)."""
+def plan_features(obs: Dict[str, np.ndarray], fork_index: int, cfg,
+                  plan: Optional[Dict[str, float]]) -> Dict[str, np.ndarray]:
+    """The gripper against route_fork's plan (harness_core.expert.plan_route): the grasp point
+    on the wire, the wire's pull along the route, and the seating height and holding distance."""
+    from harness_core.geometry import polyline_arclength, polyline_point_at
+
+    if plan is None:
+        return {k: np.zeros(n, np.float32) for k, n in PLAN_LAYOUT}
+    tcp = np.asarray(obs["tcp_pos"], dtype=float)
+    yaw = float(obs["tcp_yaw"][0])
+    c, sn = np.cos(yaw), np.sin(yaw)
+    cable = np.asarray(obs["cable"], dtype=float)
+    s = float(np.clip(plan["s_pick"], 0.05, polyline_arclength(cable)[-1] - 0.05))
+    p_w, t_w = polyline_point_at(cable, s)
+    off = np.asarray(p_w, dtype=float) - tcp
+    xg, yg, zg = c * off[0] + sn * off[1], -sn * off[0] + c * off[1], off[2]
+    twice = 2.0 * (float(np.arctan2(t_w[1], t_w[0])) - yaw)
+    pick = [xg / 0.1, yg / 0.1, zg / 0.1, _fine(xg, 0.01), _fine(yg, 0.01), _fine(zg, 0.01),
+            np.sin(twice), np.cos(twice)]
+
+    fork = np.asarray(obs["forks"][fork_index], dtype=float)
+    fix = goal_vector(obs, "route_fork", fork_index, cfg)[4:7]
+    u = fork[:2] - fix[:2]
+    length = float(np.linalg.norm(u))
+    u = u / length if length > 1e-6 else np.array([np.cos(fork[3]), np.sin(fork[3])])
+    f = np.asarray(obs["wrench"], dtype=float)[:3]
+    pull = float(-(f[0] * u[0] + f[1] * u[1]))            # the expert's tension: the wire pulling back along -u
+    beyond = float((tcp[:2] - fork[:2]) @ u) - float(plan["beyond"])
+    seat = [pull / 10.0, _fine(pull, 5.0), _fine(float(tcp[2]) - float(plan["press_z"]), 0.01),
+            beyond / 0.1, _fine(beyond, 0.01)]
+    return {"pick": np.asarray(pick, np.float32), "seat": np.asarray(seat, np.float32)}
+
+
+def state_parts(obs: Dict[str, np.ndarray], skill: str, fork_index: int, cfg,
+                plan: Optional[Dict[str, float]] = None) -> Dict[str, np.ndarray]:
+    """Every state key, by name: the base 47 values, the gripper-relative geometry and the
+    gripper against route_fork's plan (zeros for skills other than route_fork, and for the
+    plan keys when there is no plan)."""
     parts = split_state(state_vector(obs, goal_vector(obs, skill, fork_index, cfg)), BASE_LAYOUT)
     if skill == "route_fork":
         parts.update(geometry_features(obs, fork_index, cfg))
+        parts.update(plan_features(obs, fork_index, cfg, plan))
     else:
-        parts.update({k: np.zeros(n, np.float32) for k, n in GEOMETRY_LAYOUT})
+        parts.update({k: np.zeros(n, np.float32) for k, n in GEOMETRY_LAYOUT + PLAN_LAYOUT})
     return parts
 
 

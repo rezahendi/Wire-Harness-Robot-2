@@ -22,7 +22,9 @@
 # SAVE_STEPS (3000), EXTRA_TRAIN_ARGS (e.g. "--tune-visual"), WORKERS (vCPUs - 1),
 # EVAL_SEEDS (0-19), EVAL_WORKERS (4), PORT (5556), HORIZONS ("8": action steps executed per
 # chunk, one evaluation each), BASELINE (a checkpoint evaluated on the same boards for
-# comparison; ~/ckpt/route_v2/checkpoint-12000 when it exists, "" for none), OPEN_LOOP (1).
+# comparison; ~/ckpt/route_v3/checkpoint-12000 when it exists, "" for none), OPEN_LOOP (1),
+# VARIANTS ("ens4": groot_evals.sh variants run on the new checkpoint at the end, "" for none),
+# MODALITY_CONFIG (GR00T's modality config; by default the one matching the set's layout).
 set -euo pipefail
 
 NAME="${1:-route_v3}"
@@ -40,7 +42,8 @@ EVAL_SEEDS="${EVAL_SEEDS:-0-19}"
 EVAL_WORKERS="${EVAL_WORKERS:-4}"
 PORT="${PORT:-5556}"
 HORIZONS="${HORIZONS:-8}"
-BASELINE="${BASELINE-$HOME/ckpt/route_v2/checkpoint-12000}"
+BASELINE="${BASELINE-$HOME/ckpt/route_v3/checkpoint-12000}"
+VARIANTS="${VARIANTS-ens4}"
 OPEN_LOOP="${OPEN_LOOP:-1}"
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 GROOT_DIR="${GROOT_DIR:-$HOME/Isaac-GR00T}"
@@ -73,29 +76,31 @@ fi
 # 1. demos -----------------------------------------------------------------------------
 if [ -n "$DATASET" ]; then
     if [ ! -f "$DATASET/meta/info.json" ]; then echo "no packaged set at $DATASET"; exit 1; fi
-    say "1/6 recording: none, training on $DATASET"
+    say "1/7 recording: none, training on $DATASET"
 elif [ -f "$NEW/meta/info.json" ]; then
-    say "1/6 recording: done before ($NEW)"
+    say "1/7 recording: done before ($NEW)"
 else
-    say "1/6 recording into $NEW"
+    say "1/7 recording into $NEW"
     python -m harness_agent.groot_data record --out "$NEW" --seed-start "$SEED_START" --builds "$BUILDS" \
         --workers "$WORKERS" --noise "$NOISE" --hold-after "$HOLD"
 fi
 
 # 2. the training set ------------------------------------------------------------------
 if [ -f "$DATA/meta/info.json" ]; then
-    say "2/6 packaging: done before ($DATA)"
+    say "2/7 packaging: done before ($DATA)"
 else
-    say "2/6 packaging $DATA"
+    say "2/7 packaging $DATA"
     sources=("$NEW")
     if [ -n "$BASE" ]; then sources=("$BASE" "$NEW"); fi
     python -m harness_agent.groot_data merge "${sources[@]}" --out "$DATA"
 fi
 python -m harness_agent.groot_data check "$DATA" | tail -25
+MODALITY_CONFIG="${MODALITY_CONFIG:-$(python -m harness_agent.groot_data config-for "$DATA")}"
+say "modality config: $MODALITY_CONFIG"
 
 # 3. fine-tune -------------------------------------------------------------------------
 if [ -d "$CKPT/checkpoint-$STEPS" ]; then
-    say "3/6 fine-tuning: done before ($CKPT/checkpoint-$STEPS)"
+    say "3/7 fine-tuning: done before ($CKPT/checkpoint-$STEPS)"
 else
     if [ "$(free_gb)" -lt "${MIN_FREE_GB:-75}" ]; then
         say "only $(free_gb) GB free; fine-tuning needs ~75 GB (three 22 GB checkpoints while it saves)."
@@ -105,14 +110,14 @@ else
     resume=()
     if compgen -G "$CKPT/checkpoint-*" > /dev/null; then
         resume=(--resume-from-checkpoint)
-        say "3/6 fine-tuning: resuming from $(ls -d "$CKPT"/checkpoint-* | sort -V | tail -1)"
+        say "3/7 fine-tuning: resuming from $(ls -d "$CKPT"/checkpoint-* | sort -V | tail -1)"
     else
-        say "3/6 fine-tuning $STEPS steps -> $CKPT"
+        say "3/7 fine-tuning $STEPS steps -> $CKPT"
     fi
     # shellcheck disable=SC2086
     (cd "$GROOT_DIR" && uv run python gr00t/experiment/launch_finetune.py \
         --base-model-path nvidia/GR00T-N1.7-3B --dataset-path "$DATA" --embodiment-tag NEW_EMBODIMENT \
-        --modality-config-path "$REPO/groot/harness_config.py" --num-gpus 1 --output-dir "$CKPT" \
+        --modality-config-path "$MODALITY_CONFIG" --num-gpus 1 --output-dir "$CKPT" \
         --max-steps "$STEPS" --save-steps "$SAVE_STEPS" --save-total-limit 2 \
         --global-batch-size 32 --dataloader-num-workers 8 $EXTRA_TRAIN_ARGS "${resume[@]}")
 fi
@@ -173,7 +178,7 @@ open_loop() {   # open_loop <dataset> <label> <episode ids...>: predicted vs rec
 
 # 4. fit: demos it trained on, demos from the test boards it never saw ----------------
 mkdir -p "$EVAL"
-say "4/6 serving $CKPT/checkpoint-$STEPS on port $PORT"
+say "4/7 serving $CKPT/checkpoint-$STEPS on port $PORT"
 serve "$CKPT/checkpoint-$STEPS"
 if [ "$OPEN_LOOP" = 1 ]; then
     if [ ! -f "$VAL/meta/info.json" ]; then
@@ -185,7 +190,7 @@ if [ "$OPEN_LOOP" = 1 ]; then
 fi
 
 # 5. closed loop -------------------------------------------------------------------------
-say "5/6 closed-loop evaluation"
+say "5/7 closed-loop evaluation"
 for h in $HORIZONS; do
     if [ "$h" = 8 ]; then evaluate "$EVAL" 8; else evaluate "${EVAL}_h$h" "$h"; fi
 done
@@ -193,7 +198,7 @@ done
 # 6. the previous model on the same boards -------------------------------------------------
 if [ -n "$BASELINE" ] && [ -d "$BASELINE" ]; then
     base_name="$(basename "$(dirname "$BASELINE")")"
-    say "6/6 baseline: $BASELINE on the same boards"
+    say "6/7 baseline: $BASELINE on the same boards"
     serve "$BASELINE"
     evaluate "$HOME/eval/${base_name}_on_${NAME}_boards" 8
 fi
@@ -206,6 +211,13 @@ done
 for f in "$EVAL"/open_loop_*.log; do
     if [ -f "$f" ]; then echo "== $f"; grep -E "Average M" "$f" || true; fi
 done
+
+# 7. the same checkpoint run other ways (scripts/groot_evals.sh) ----------------------------
+if [ -n "$VARIANTS" ]; then
+    say "7/7 more evaluations of $CKPT/checkpoint-$STEPS: $VARIANTS"
+    VARIANTS="$VARIANTS" STEPS="$STEPS" EVAL_SEEDS="$EVAL_SEEDS" EVAL_WORKERS="$EVAL_WORKERS" PORT="$PORT" \
+        bash "$REPO/scripts/groot_evals.sh" "$NAME" || say "more evaluations failed; the round's results stand"
+fi
 
 say "round finished. Results: ~/eval/$NAME*   Log: $LOG"
 echo "Stop the VM in the Nebius console now (Compute > Virtual machines > Stop)."

@@ -25,6 +25,11 @@ Recording can be stopped and resumed. Finished builds are marked in <out>/stagin
 same command run again (after a preempted VM, say) skips them. Ctrl-c stops the recording
 and packages the episodes finished so far. ``merge`` combines recorded sets into one.
 
+Next to every episode the recorder keeps the perception its states were computed from
+(raw/chunk-*/episode_*.npz: tool pose, wire points, fixtures, forces, the skill's plan), so a
+later state layout can be computed from a recording instead of recording again. GR00T does
+not read it. ``config-for`` names the GR00T modality config that matches a set's layout.
+
 Rendering needs an OpenGL backend: MUJOCO_GL=egl on a GPU machine, osmesa elsewhere.
 """
 
@@ -45,6 +50,7 @@ import numpy as np
 from . import groot_features as gf
 
 CHUNK_SIZE = 1000
+RAW_PATH = "raw/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.npz"   # the perception behind each state
 DEFAULT_SPEC = "demo_3fork.yaml"
 DONE_DIR = "_done"          # in staging: one marker per finished build, for resuming
 
@@ -75,16 +81,31 @@ def _spec_path(name: str) -> str:
 
 
 # ---------------------------------------------------------------- recording
+RAW_KEYS = ("time", "tcp_pos", "tcp_yaw", "target_pos", "target_yaw", "gripper", "wrench", "cable", "forks",
+            "anchor_pos", "holder_pos", "holder_yaw", "connector_pos", "board_z")
+
+
 class EpisodeBuffer:
-    def __init__(self, skill: str, target: str, state_fn):
+    def __init__(self, skill: str, target: str, state_fn, plan_fn=None):
         self.skill, self.target, self.state_fn = skill, target, state_fn       # state_fn(obs) -> vector
+        self.plan_fn = plan_fn                    # () -> the skill's plan (route_fork), kept with the raw frames
         self.text = gf.instruction(skill, target)
         self.frames: Dict[str, List[np.ndarray]] = {k: [] for k in gf.VIDEO_KEYS}
         self.states: List[np.ndarray] = []
         self.actions: List[np.ndarray] = []
+        self.raw: Dict[str, List[np.ndarray]] = {k: [] for k in RAW_KEYS + ("plan",)}
 
     def __len__(self) -> int:
         return len(self.actions)
+
+    def keep_raw(self, obs: Dict[str, np.ndarray]) -> None:
+        """The perception behind this frame's state, so later state layouts can be computed from
+        the recording instead of recording again (raw.npz next to the episode)."""
+        for k in RAW_KEYS:
+            self.raw[k].append(np.asarray(obs[k], dtype=np.float32))
+        plan = self.plan_fn() if self.plan_fn is not None else None
+        self.raw["plan"].append(np.array([np.nan] * 3 if plan is None else
+                                         [plan["s_pick"], plan["beyond"], plan["press_z"]], dtype=np.float32))
 
 
 class RecoveryNoise:
@@ -168,10 +189,11 @@ def make_recording_session(spec, seed: int, randomize: bool, skills: Sequence[st
             for k in gf.VIDEO_KEYS:
                 ep.frames[k].append(imgs[k])
             ep.states.append(ep.state_fn(obs))
+            ep.keep_raw(obs)
             ep.actions.append(np.clip(np.asarray(action, dtype=np.float32).reshape(5), -1.0, 1.0))
 
-        def _record(self, skill: str, target: str, state_fn, run):
-            self._ep = EpisodeBuffer(skill, target, state_fn)
+        def _record(self, skill: str, target: str, state_fn, run, plan_fn=None):
+            self._ep = EpisodeBuffer(skill, target, state_fn, plan_fn)
             if self._noise is not None:
                 self._noise.reset()
                 self.action_noise = self._noise
@@ -200,10 +222,14 @@ def make_recording_session(spec, seed: int, randomize: bool, skills: Sequence[st
             i = self._fork_index(fork_id)
             if "route_fork" not in skills or i is None or self.env is None:
                 return super().route_fork(fork_id, attempt, pick_offset_mm)
-            cfg = self.cfg
+            cfg, expert = self.cfg, self.expert
+            # the expert makes its plan (grasp point, holding distance) before its first action,
+            # which is when the first state is recorded
             return self._record("route_fork", fork_id,
-                                lambda obs: gf.join_state(gf.state_parts(obs, "route_fork", i, cfg)),
-                                lambda: super(DemoSession, self).route_fork(fork_id, attempt, pick_offset_mm))
+                                lambda obs: gf.join_state(gf.state_parts(obs, "route_fork", i, cfg,
+                                                                         plan=expert.route_plan)),
+                                lambda: super(DemoSession, self).route_fork(fork_id, attempt, pick_offset_mm),
+                                plan_fn=lambda: expert.route_plan)
 
         def insert_connector(self):
             if "insert_connector" not in skills or self.env is None:
@@ -248,6 +274,8 @@ def write_episode(ep: EpisodeBuffer, folder: str, meta: Dict[str, Any], fps: int
                 w.append_data(f)
         finally:
             w.close()
+    if ep.raw["time"]:
+        np.savez_compressed(os.path.join(folder, "raw.npz"), **{k: np.stack(v) for k, v in ep.raw.items()})
     with open(os.path.join(folder, "meta.json"), "w") as f:
         json.dump({**meta, "task": ep.text, "length": n}, f)
 
@@ -504,7 +532,8 @@ def episodes_in(source: str) -> Tuple[str, List[Dict[str, Any]], Optional[int]]:
                                                                                     episode_index=i)),
                           "videos": {k: os.path.join(source, info["video_path"].format(
                               episode_chunk=chunk, video_key=f"observation.images.{k}", episode_index=i))
-                              for k in gf.VIDEO_KEYS}})
+                              for k in gf.VIDEO_KEYS},
+                          "raw": os.path.join(source, RAW_PATH.format(episode_chunk=chunk, episode_index=i))})
         size = info["features"][f"observation.images.{gf.VIDEO_KEYS[0]}"]["shape"][0]
         return "dataset", found, int(size)
     staging = os.path.join(source, "staging") if os.path.isdir(os.path.join(source, "staging")) else source
@@ -518,7 +547,8 @@ def episodes_in(source: str) -> Tuple[str, List[Dict[str, Any]], Optional[int]]:
         with open(os.path.join(folder, "meta.json")) as f:
             meta = json.load(f)
         found.append({"meta": meta, "parquet": os.path.join(folder, "data.parquet"),
-                      "videos": {k: os.path.join(folder, f"{k}.mp4") for k in gf.VIDEO_KEYS}})
+                      "videos": {k: os.path.join(folder, f"{k}.mp4") for k in gf.VIDEO_KEYS},
+                      "raw": os.path.join(folder, "raw.npz")})
     return "staging", found, None
 
 
@@ -590,6 +620,10 @@ def merge(sources: Union[str, Sequence[str]], out: str, size: Optional[int] = No
             vdir = os.path.join(out, "videos", f"chunk-{chunk:03d}", f"observation.images.{k}")
             os.makedirs(vdir, exist_ok=True)
             shutil.copy2(it["videos"][k], os.path.join(vdir, f"episode_{ep_idx:06d}.mp4"))
+        if it.get("raw") and os.path.exists(it["raw"]):      # not part of LeRobot: GR00T does not read it
+            raw = os.path.join(out, RAW_PATH.format(episode_chunk=chunk, episode_index=ep_idx))
+            os.makedirs(os.path.dirname(raw), exist_ok=True)
+            shutil.copy2(it["raw"], raw)
         episodes.append({"episode_index": ep_idx, "tasks": [m["task"]], "length": n})
         extra.append({"episode_index": ep_idx, **{k: v for k, v in m.items() if k not in ("task", "length")},
                       "length": n, "task": m["task"]})
@@ -751,6 +785,20 @@ def _bench_report(b: Dict[str, Any]) -> str:
 
 
 # --------------------------------------------------------------------- CLI
+CONFIG_BY_WIDTH = {gf.BASE_DIM: "harness_config_base.py", gf.V3_DIM: "harness_config_v3.py",
+                   gf.STATE_DIM: "harness_config.py"}
+
+
+def config_for(dataset: str) -> str:
+    """The repo's GR00T modality config (groot/*.py) for a recorded set's state layout."""
+    with open(os.path.join(dataset, "meta", "info.json")) as f:
+        width = int(json.load(f)["features"]["observation.state"]["shape"][0])
+    if width not in CONFIG_BY_WIDTH:
+        raise SystemExit(f"{dataset}: no modality config for a {width}-value state")
+    repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+    return os.path.join(repo, "groot", CONFIG_BY_WIDTH[width])
+
+
 def _parse_seeds(text: str) -> List[int]:
     out: List[int] = []
     for part in text.split(","):
@@ -790,6 +838,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     m.add_argument("--keep-staging", action="store_true", help="keep the staged episodes after packaging")
     st = sub.add_parser("stats", help="(re)write meta/stats.json the way GR00T computes it")
     st.add_argument("dataset")
+    cf = sub.add_parser("config-for", help="print the GR00T modality config file that matches a set's layout")
+    cf.add_argument("dataset")
     b = sub.add_parser("bench", help="how fast this machine records (renderer, render time, physics speed)")
     b.add_argument("--spec", default=DEFAULT_SPEC)
     b.add_argument("--seed", type=int, default=1000)
@@ -805,6 +855,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         res = merge(args.sources, args.out, args.size, keep_staging=args.keep_staging)
         note = f", {res['duplicates']} duplicates left out" if res["duplicates"] else ""
         print(f"{res['episodes']} episodes ({res['frames']} frames){note} -> {args.out}; tasks: {res['tasks']}")
+        return 0
+    if args.cmd == "config-for":
+        print(config_for(args.dataset))
         return 0
     if args.cmd == "stats":
         write_stats(args.dataset)

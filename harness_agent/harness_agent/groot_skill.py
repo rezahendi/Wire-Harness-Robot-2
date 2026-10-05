@@ -38,7 +38,8 @@ REFUSED = ("infeasible_spec", "unknown_fork", "previous_fork_not_seated")
 MILESTONES = ("in_hand", "lifted", "over_slot", "inside", "released")
 TRAJECTORY_COLUMNS = ["t", "tcp_x", "tcp_y", "tcp_z", "tcp_yaw", "gripper", "fx", "fy", "fz", "slot_y", "slot_z",
                       "inside", "a_dx", "a_dy", "a_dz", "a_dyaw", "a_grip"]
-IN_HAND_MM = 15.0       # closed gripper with a perceived wire point this close to the TCP
+IN_HAND_MM = 15.0       # closed gripper with a perceived wire point this close to the TCP ...
+HOLDS_MM = 2.0          # ... and the fingers stopped by the wire (closed on nothing they meet at ~0 mm)
 OVER_SLOT_MM = 5.0      # wire in hand, crossing the fork's slot plane this close to the slot (any height)
 LET_GO_S = 2.0          # with restarts: the gripper open this long after holding the wire, the wire not in the slot
 NO_PROGRESS_S = 12.0    # with restarts: no new milestone for this long (a good try takes ~15 s in all)
@@ -70,6 +71,7 @@ class GrootRunner:
         self._cams: Dict[int, gf.Cameras] = {}
         self.last: Dict[str, Any] = {}
         self._state_keys: Optional[List[str]] = None     # the state keys the served model was trained with
+        self._plan: Optional[Dict[str, float]] = None    # route_fork's plan for the current try (state keys v4)
 
     def wants(self, skill: str, target: str = "", attempt: int = 0) -> bool:
         if skill not in self.skills:
@@ -97,7 +99,7 @@ class GrootRunner:
 
     def _chunk(self, session, obs, i: int, text: str) -> np.ndarray:
         imgs = self.cameras(session).render(session.env.cell.sim.data)
-        parts = gf.state_parts(obs, "route_fork", i, session.cfg)
+        parts = gf.state_parts(obs, "route_fork", i, session.cfg, plan=self._plan)
         out = self.client.get_action(gf.observation_for_policy(imgs, parts, text, self.state_keys()))
         chunk = gf.join_action({k: np.asarray(v)[0] for k, v in out.items()})
         return np.clip(chunk, -1.0, 1.0)
@@ -126,9 +128,17 @@ class GrootRunner:
         """One go at the fork: None once the wire is routed, else (only when ``watch``) why it stalled."""
         from harness_core.perception import cable_crossing_in_fork
 
+        from harness_core.expert import ExpertParams, plan_route
+
         cfg = session.cfg
         text = gf.instruction("route_fork", session.route[i])
         obs = session.obs
+        # the plan the expert would make here (grasp point, holding distance): made once per try,
+        # as the expert makes it once per call, and part of the state of models trained with it
+        params = getattr(getattr(session, "expert", None), "p", None) or ExpertParams()
+        self._plan = plan_route(obs, i, cfg, params)
+        self.last.setdefault("plans", []).append(None if self._plan is None else
+                                                 {k: round(v, 4) for k, v in self._plan.items()})
         bz = float(obs["board_z"][0])
         z_top = bz + cfg.fork.post_height + cfg.fork.prong_height
         z_clear = z_top + 0.03
@@ -158,10 +168,11 @@ class GrootRunner:
             t = float(obs["time"][0])
             opening = float(obs["gripper"][0])
             closed = opening < wire_d + 0.003
+            holds = closed and opening > HOLDS_MM / 1000.0
             if closed:
                 self.last["grasped"] = True
             chk = cable_crossing_in_fork(obs["cable"], obs["forks"][i], cfg.fork, bz)
-            now = self._milestones(obs, i, closed, z_top, chk, cfg.fork.slot_width, opening > 0.02, t - t0)
+            now = self._milestones(obs, i, holds, z_top, chk, cfg.fork.slot_width, opening > 0.02, t - t0)
             if set(now) - seen:
                 seen.update(now)
                 progress_t = t
@@ -192,13 +203,13 @@ class GrootRunner:
             if t - progress_t >= NO_PROGRESS_S:
                 return f"no progress for {NO_PROGRESS_S:.0f} s"
 
-    def _milestones(self, obs, i: int, closed: bool, z_top: float, chk: Dict[str, Any], slot_width: float,
+    def _milestones(self, obs, i: int, holds: bool, z_top: float, chk: Dict[str, Any], slot_width: float,
                     opened: bool, t: float) -> List[str]:
         """Note the milestones reached for the first time (seconds after the start); returns those true now."""
         reached = self.last["milestones"]
         tcp = np.asarray(obs["tcp_pos"], dtype=float)
         cable = np.asarray(obs["cable"], dtype=float)
-        in_hand = closed and float(np.min(np.linalg.norm(cable - tcp, axis=1))) < IN_HAND_MM / 1000.0
+        in_hand = holds and float(np.min(np.linalg.norm(cable - tcp, axis=1))) < IN_HAND_MM / 1000.0
         fork_mm = 1000.0 * float(np.linalg.norm(np.asarray(obs["forks"][i][:2], dtype=float) - tcp[:2]))
         self.last["fork_distance_mm"] = round(fork_mm, 1)
         lined_up = abs(float(chk["y"])) < slot_width / 2 + OVER_SLOT_MM / 1000.0

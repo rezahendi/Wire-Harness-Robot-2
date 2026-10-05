@@ -1,12 +1,12 @@
-# GR00T N1.7 modality config for the wire-harness cell (UR5e-class arm, wrist F/T sensor,
-# parallel gripper, 500 Hz admittance controller underneath).
+# GR00T N1.7 modality config for the wire-harness cell, state layout v3 (66 values: no plan
+# keys): the layout of route_v3 and the sets recorded with it. New recordings use
+# harness_config.py; `python -m harness_agent.groot_data config-for <set>` names the right one.
 #
 # Pass it to GR00T's fine-tuning script:
-#     --embodiment-tag NEW_EMBODIMENT --modality-config-path <repo>/groot/harness_config.py
+#     --embodiment-tag NEW_EMBODIMENT --modality-config-path <repo>/groot/harness_config_v3.py
 #
 # Keys must match meta/modality.json written by `python -m harness_agent.groot_data record`
-# (harness_agent/harness_agent/groot_features.py defines the layout). Older sets: harness_config_v3.py
-# (66 values) and harness_config_base.py (47); `python -m harness_agent.groot_data config-for <set>`.
+# (harness_agent/harness_agent/groot_features.py defines the layout).
 
 from gr00t.configs.data.embodiment_configs import register_modality_config
 from gr00t.data.embodiment_tags import EmbodimentTag
@@ -27,13 +27,11 @@ harness_config = {
         modality_keys=["scene", "wrist"],
     ),
     # tcp pose, commanded lead, gripper, force/torque, goal fixture + fixation, 8 wire keypoints,
-    # the geometry measured from the gripper (route frame of the target fork, nearest wire point,
-    # the wire's crossing of the slot) and the gripper against the skill's plan (grasp point,
-    # wire pull, seating height and holding distance): 79 values in all, layout v4
+    # and the geometry measured from the gripper: route frame of the target fork, nearest wire
+    # point, the wire's crossing of the slot (66 values in all)
     "state": ModalityConfig(
         delta_indices=[0],
-        modality_keys=["tcp", "command", "gripper", "wrench", "goal", "cable", "route", "wire", "slot",
-                       "pick", "seat"],
+        modality_keys=["tcp", "command", "gripper", "wrench", "goal", "cable", "route", "wire", "slot"],
     ),
     # the cell's 5-D action: TCP step (dx dy dz, x 1 cm), yaw step (x 0.15 rad), gripper (-1 open .. +1 closed).
     # The steps are already relative to the commanded pose, so the model predicts them as they are.

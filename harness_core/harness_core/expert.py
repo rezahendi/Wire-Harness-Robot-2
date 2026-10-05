@@ -67,6 +67,103 @@ class ExpertParams:
     max_route_attempts: int = 3
 
 
+# Where route_fork grasps the wire, as plain functions of an observation: the expert plans
+# its pick with them, and the GR00T state features use the same plan (groot_features "pick").
+WIRE_DROP = 0.0045               # wire axis below the TCP when grasped
+
+
+def fixation_point(obs: Obs, i: int, cfg: CellConfig):
+    """Point (3D) and arc length where the wire is currently fixed before fork i."""
+    cable = obs["cable"]
+    if i == 0:
+        p = obs["anchor_pos"]
+    else:
+        fx, fy, fz, fyaw = obs["forks"][i - 1]
+        p = np.array([fx, fy, fz + cfg.fork.post_height + cfg.wire.radius])
+    return p, arclength_near(cable, p)
+
+
+def choose_pick_arclength(obs: Obs, cfg: CellConfig, s_ideal: float, s_min: float, s_max: float,
+                          forward_first: bool = False) -> Optional[float]:
+    """Arc length closest to s_ideal (within [s_min, s_max]) whose wire point is clear of
+    the fixtures, so the fingers do not land on a fork, the holder or the clamp.
+    ``forward_first`` searches further along the wire before going back, so a retry
+    that asks for more wire actually gets more wire."""
+    cable = obs["cable"]
+    obstacles = [f[:2] for f in obs["forks"]]
+    obstacles.append(obs["holder_pos"][:2])
+    obstacles.append(obs["anchor_pos"][:2])
+    if s_max < s_min:
+        return None
+    offsets = [0.0]
+    if forward_first:
+        offsets += [0.01 * k for k in range(1, 26)] + [-0.01 * k for k in range(1, 11)]
+    else:
+        for k in range(1, 11):
+            offsets += [0.01 * k, -0.01 * k]
+    bz = float(obs["board_z"][0])
+    on_board_limit = bz + 3.0 * cfg.wire.radius
+    fallback = None
+    for off in offsets:
+        s = s_ideal + off
+        if s < s_min or s > s_max:
+            continue
+        p, _ = polyline_point_at(cable, s)
+        if all(np.linalg.norm(p[:2] - o) > 0.05 for o in obstacles):
+            if p[2] < on_board_limit:
+                return s               # clear of fixtures and lying on the board
+            if fallback is None:
+                fallback = s           # clear, but draped over something
+    if fallback is not None:
+        return fallback
+    return float(np.clip(s_ideal, s_min, s_max))
+
+
+def plan_route_pick(obs: Obs, i: int, cfg: CellConfig, params: "ExpertParams", attempt: int = 0,
+                    pick_offset: Optional[float] = None) -> Optional[float]:
+    """Arc length at which route_fork grasps the wire for fork i (None: no reachable point).
+
+    Enough wire, held from the last fixation, to carry it taut over the fork and ``beyond``
+    past it at transit height; retries (``attempt``) shift the pick 2 cm further along."""
+    bz = float(obs["board_z"][0])
+    fx, fy = (float(v) for v in obs["forks"][i][:2])
+    p_fix, s_fix = fixation_point(obs, i, cfg)
+    L = float(np.linalg.norm(np.array([fx, fy]) - p_fix[:2]))
+    z_top = bz + cfg.fork.post_height + cfg.fork.prong_height
+    z_transit = z_top + params.transit_clearance
+    ell_ideal = math.hypot(L + params.beyond, (z_transit - WIRE_DROP) - p_fix[2]) + params.pick_margin
+    rise_min = (z_top + 0.03 - WIRE_DROP) - p_fix[2]
+    ell_min = math.hypot(L + 0.025, rise_min) + params.pick_margin
+    s_total = polyline_arclength(obs["cable"])[-1]
+    shift = 0.02 * attempt if pick_offset is None else float(pick_offset)
+    return choose_pick_arclength(obs, cfg, s_fix + ell_ideal + shift, s_fix + ell_min, s_total - 0.06,
+                                 forward_first=shift > 0.0)
+
+
+def hold_distance(L: float, ell: float, rise_min: float, params: "ExpertParams") -> float:
+    """How far from the fixation (along the route) the gripper holds ``ell`` of wire while
+    seating it in a fork ``L`` away: ``beyond`` past the fork, less if the wire is short."""
+    ell_eff = ell - 0.012
+    D = min(L + params.beyond, math.sqrt(max(ell_eff ** 2 - rise_min ** 2, 0.0)))
+    return max(D, L + 0.02)
+
+
+def plan_route(obs: Obs, i: int, cfg: CellConfig, params: "ExpertParams", attempt: int = 0,
+               pick_offset: Optional[float] = None) -> Optional[Dict[str, float]]:
+    """route_fork's plan for fork i, from one observation: the grasp's arc length on the wire
+    (``s_pick``), how far past the fork the wire is held while seating (``beyond``, m) and the
+    tool height for seating (``press_z``, world). None when no grasp point is reachable."""
+    s_pick = plan_route_pick(obs, i, cfg, params, attempt, pick_offset)
+    if s_pick is None:
+        return None
+    bz = float(obs["board_z"][0])
+    p_fix, s_fix = fixation_point(obs, i, cfg)
+    L = float(np.linalg.norm(np.asarray(obs["forks"][i][:2], dtype=float) - p_fix[:2]))
+    rise_min = (bz + cfg.fork.post_height + cfg.fork.prong_height + 0.03 - WIRE_DROP) - p_fix[2]
+    return {"s_pick": float(s_pick), "beyond": hold_distance(L, s_pick - s_fix, rise_min, params) - L,
+            "press_z": bz + params.press_height}
+
+
 class HarnessExpert:
     def __init__(self, cfg: CellConfig, spec: Optional[ActionSpec] = None,
                  params: Optional[ExpertParams] = None, dt: Optional[float] = None,
@@ -89,6 +186,7 @@ class HarnessExpert:
         self.failed = False
         self.fail_reason = ""
         self.log = []
+        self.route_plan: Optional[Dict[str, float]] = None   # the current route_fork's plan_route
         self._grip = -1.0
         self._gen = self._program()
         next(self._gen)
@@ -329,49 +427,11 @@ class HarnessExpert:
     # ------------------------------------------------------------ wire pick
     def _fixation(self, i: int):
         """Point (3D) and arc length where the wire is currently fixed before fork i."""
-        obs = self._obs
-        cable = obs["cable"]
-        if i == 0:
-            p = obs["anchor_pos"]
-        else:
-            fx, fy, fz, fyaw = obs["forks"][i - 1]
-            p = np.array([fx, fy, fz + self.cfg.fork.post_height + self.cfg.wire.radius])
-        return p, arclength_near(cable, p)
+        return fixation_point(self._obs, i, self.cfg)
 
     def _choose_pick_arclength(self, s_ideal: float, s_min: float, s_max: float,
                                forward_first: bool = False) -> Optional[float]:
-        """Arc length closest to s_ideal (within [s_min, s_max]) whose wire point is clear of
-        the fixtures, so the fingers do not land on a fork, the holder or the clamp.
-        ``forward_first`` searches further along the wire before going back, so a retry
-        that asks for more wire actually gets more wire."""
-        cable = self._obs["cable"]
-        obstacles = [f[:2] for f in self._obs["forks"]]
-        obstacles.append(self._obs["holder_pos"][:2])
-        obstacles.append(self._obs["anchor_pos"][:2])
-        if s_max < s_min:
-            return None
-        offsets = [0.0]
-        if forward_first:
-            offsets += [0.01 * k for k in range(1, 26)] + [-0.01 * k for k in range(1, 11)]
-        else:
-            for k in range(1, 11):
-                offsets += [0.01 * k, -0.01 * k]
-        bz = self._board_z()
-        on_board_limit = bz + 3.0 * self.cfg.wire.radius
-        fallback = None
-        for off in offsets:
-            s = s_ideal + off
-            if s < s_min or s > s_max:
-                continue
-            p, _ = polyline_point_at(cable, s)
-            if all(np.linalg.norm(p[:2] - o) > 0.05 for o in obstacles):
-                if p[2] < on_board_limit:
-                    return s               # clear of fixtures and lying on the board
-                if fallback is None:
-                    fallback = s           # clear, but draped over something
-        if fallback is not None:
-            return fallback
-        return float(np.clip(s_ideal, s_min, s_max))
+        return choose_pick_arclength(self._obs, self.cfg, s_ideal, s_min, s_max, forward_first)
 
     def _pick_wire(self, s_pick: float, yaw_ref: float, carry_yaw: Optional[float] = None) -> Generator:
         """Grasp the wire at arc length s_pick. With carry_yaw, the finger orientation is
@@ -450,18 +510,10 @@ class HarnessExpert:
         u = (f_xy - p_fix[:2]) / max(L, 1e-6)
         z_top = bz + cfg.fork.post_height + cfg.fork.prong_height
         z_transit = z_top + p_cfg.transit_clearance
-        wire_drop = 0.0045                       # wire axis below the TCP when grasped
-        # Wire length (fixation -> gripper) we would like to hold: enough to carry it,
-        # taut, over the fork and `beyond` past it at transit height ...
-        ell_ideal = math.hypot(L + p_cfg.beyond, (z_transit - wire_drop) - p_fix[2]) + p_cfg.pick_margin
-        # ... and the minimum that still reaches 2.5 cm past the fork at the lowest carry height
-        rise_min = (z_top + 0.03 - wire_drop) - p_fix[2]
-        ell_min = math.hypot(L + 0.025, rise_min) + p_cfg.pick_margin
-        s_total = polyline_arclength(obs["cable"])[-1]
-        shift = 0.02 * attempt if pick_offset is None else float(pick_offset)
-        s_pick = self._choose_pick_arclength(s_fix + ell_ideal + shift,
-                                             s_fix + ell_min, s_total - 0.06,
-                                             forward_first=shift > 0.0)
+        # the wire length (fixation -> gripper) to hold: plan_route_pick; the lowest carry height
+        rise_min = (z_top + 0.03 - WIRE_DROP) - p_fix[2]
+        self.route_plan = plan_route(obs, i, cfg, p_cfg, attempt, pick_offset)
+        s_pick = None if self.route_plan is None else self.route_plan["s_pick"]
         if s_pick is None:
             self._say(f"fork {i}: no reachable pick point on the wire")
             return False
@@ -478,9 +530,7 @@ class HarnessExpert:
         if abs(self._q6_after(yaw)) > 5.6:
             yaw = self._closest_yaw(route_yaw, float(self._obs["tcp_yaw"][0]))
         ell = s_pick - s_fix
-        ell_eff = ell - 0.012
-        D_final = min(L + p_cfg.beyond, math.sqrt(max(ell_eff ** 2 - rise_min ** 2, 0.0)))
-        D_final = max(D_final, L + 0.02)
+        D_final = hold_distance(L, ell, rise_min, p_cfg)
         if not (yield from self._carry_over(p_fix, ell, D_final, route_yaw, yaw)):
             self._say("carry-over aborted")
             yield from self._set_grip(-1.0, 0.3)

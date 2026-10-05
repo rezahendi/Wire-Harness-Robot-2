@@ -35,7 +35,9 @@ class _Cfg:
 
 def test_state_vector_layout_matches_the_names_and_slices():
     assert gf.BASE_DIM == len(gf.BASE_NAMES) == 47 and gf.ACTION_DIM == len(gf.ACTION_NAMES) == 5
-    assert gf.STATE_DIM == len(gf.STATE_NAMES) == 66 and gf.STATE_LAYOUT[:6] == gf.BASE_LAYOUT
+    assert gf.V3_DIM == len(gf.V3_NAMES) == 66 and gf.STATE_LAYOUT[:6] == gf.BASE_LAYOUT
+    assert gf.STATE_DIM == len(gf.STATE_NAMES) == 79 and gf.STATE_LAYOUT[:9] == gf.V3_LAYOUT
+    assert gf.STATE_NAMES[:66] == gf.V3_NAMES and sorted(gf.STATE_LAYOUTS) == [47, 66, 79]
     obs = fake_obs(yaw=3.1, target_yaw=-3.1)                      # the yaw lead wraps around pi
     goal = gf.goal_vector(obs, "route_fork", 1, _Cfg)
     v = gf.state_vector(obs, goal)
@@ -75,24 +77,89 @@ def test_geometry_is_measured_from_the_gripper():
     assert list(base["state"]) == [k for k, _ in gf.BASE_LAYOUT]   # what a model of the base layout gets
 
 
+def test_plan_keys_measure_the_gripper_against_the_experts_plan():
+    obs = fake_obs(yaw=0.0)
+    obs["board_z"] = np.array([0.0])
+    obs["forks"] = np.array([[0.5, 0.0, 0.0, 0.0], [0.6, 0.0, 0.0, 0.0]])
+    obs["anchor_pos"] = np.array([0.3, 0.0, 0.03])            # route to F1 runs along +x
+    xs = np.linspace(0.3, 0.7, 41)
+    obs["cable"] = np.stack([xs, np.full_like(xs, 0.002), np.full_like(xs, 0.003)], axis=1)  # along x, s=0 at 0.3
+    plan = {"s_pick": 0.25, "beyond": 0.07, "press_z": 0.014}          # grasp at x = 0.55
+    obs["tcp_pos"] = np.array([0.55, 0.0, 0.03])
+    obs["wrench"] = np.array([-4.0, 0.0, 0.0, 0.0, 0.0, 0.0])           # the wire pulls back towards the fixation
+    parts = gf.state_parts(obs, "route_fork", 0, _Cfg, plan=plan)
+    pick, seat = parts["pick"], parts["seat"]
+    assert np.allclose(pick[:3], [0.0, 0.02, -0.27], atol=1e-4)       # 2 mm to the left, 27 mm below
+    assert np.isclose(pick[4], np.tanh(0.2), atol=1e-4) and np.isclose(pick[7], 1.0)
+    assert np.isclose(seat[0], 0.4) and np.isclose(seat[2], np.tanh(1.6), atol=1e-4)
+    assert np.isclose(seat[3], (0.05 - 0.07) / 0.1, atol=1e-5)       # 5 cm past the fork, plan says 7
+    v = gf.join_state(parts)
+    assert v.shape == (79,) and np.allclose(gf.split_state(v)["seat"], seat)
+    assert not gf.state_parts(obs, "route_fork", 0, _Cfg)["pick"].any()          # no plan: zeros
+    assert gf.join_state(parts, gf.V3_LAYOUT).shape == (66,)
+
+
+def test_the_expert_plans_route_fork_with_the_shared_plan():
+    from harness_agent.session import CellSession
+    from harness_agent.spec import HarnessSpec
+    from harness_core.expert import plan_route
+    spec_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "specs")
+    s = CellSession(HarnessSpec.from_yaml(os.path.join(spec_dir, "demo_3fork.yaml")), seed=1003, randomize=True)
+    try:
+        obs = s.obs
+        s.expert._last_obs = obs
+        gen = s.expert._route_fork(0)
+        next(gen)                                         # plans, then asks for its first action
+        gen.close()
+        mine = plan_route(obs, 0, s.cfg, s.expert.p)
+        assert mine is not None and s.expert.route_plan == mine
+        assert 0.0 < mine["beyond"] < 0.2 and mine["s_pick"] > 0.1
+    finally:
+        s.close()
+
+
+def test_raw_frames_travel_with_the_episodes(tmp_path):
+    from harness_agent.groot_data import EpisodeBuffer, config_for, merge, write_episode
+    ep = EpisodeBuffer("route_fork", "F1", None, plan_fn=lambda: {"s_pick": 0.25, "beyond": 0.07, "press_z": 0.01})
+    obs = dict(fake_obs(), time=np.array([0.5]), board_z=np.array([0.0]))
+    for t in range(6):
+        for v in gf.VIDEO_KEYS:
+            ep.frames[v].append(np.full((64, 64, 3), 40 * t, np.uint8))
+        ep.states.append(np.zeros(gf.STATE_DIM, np.float32))
+        ep.actions.append(np.zeros(5, np.float32))
+        ep.keep_raw(obs)
+    write_episode(ep, str(tmp_path / "staging" / "s001000_01"),
+                  {"seed": 1000, "order": 1, "skill": "route_fork", "target": "F1", "scenario": "nominal"})
+    merge(str(tmp_path / "staging"), str(tmp_path / "set"), size=64)
+    raw = np.load(tmp_path / "set" / "raw" / "chunk-000" / "episode_000000.npz")
+    assert raw["cable"].shape == (6, 25, 3) and np.allclose(raw["plan"][0], [0.25, 0.07, 0.01])
+    assert config_for(str(tmp_path / "set")).endswith(os.path.join("groot", "harness_config.py"))
+    assert os.path.exists(config_for(str(tmp_path / "set")))
+
+
 def test_modality_json_matches_the_groot_config_keys():
     from harness_agent.groot_data import info_json, modality_json
     m = modality_json()
-    assert list(m["state"]) == ["tcp", "command", "gripper", "wrench", "goal", "cable", "route", "wire", "slot"]
+    assert list(m["state"]) == ["tcp", "command", "gripper", "wrench", "goal", "cable", "route", "wire", "slot",
+                                "pick", "seat"]
     assert m["state"]["cable"] == {"start": 23, "end": 47} and m["state"]["slot"] == {"start": 63, "end": 66}
+    assert m["state"]["pick"] == {"start": 66, "end": 74} and m["state"]["seat"] == {"start": 74, "end": 79}
+    assert list(modality_json(66)["state"])[-1] == "slot"
     assert m["action"]["gripper"] == {"start": 4, "end": 5}
     assert m["annotation"] == {"human.task_description": {"original_key": "task_index"}}
     assert list(modality_json(47)["state"]) == ["tcp", "command", "gripper", "wrench", "goal", "cable"]
     info = info_json(3, 900, 2, 256)
-    assert info["features"]["observation.state"]["shape"] == [66]
-    assert len(info["features"]["observation.state"]["names"]) == 66
+    assert info["features"]["observation.state"]["shape"] == [79]
+    assert len(info["features"]["observation.state"]["names"]) == 79
+    assert info_json(3, 900, 2, 256, state_dim=66)["features"]["observation.state"]["shape"] == [66]
     assert info_json(3, 900, 2, 256, state_dim=47)["features"]["observation.state"]["shape"] == [47]
     assert info["features"]["observation.images.wrist"]["shape"] == [256, 256, 3]
     here = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
-    for name, dim in (("harness_config.py", 66), ("harness_config_base.py", 47)):
+    for name, dim in (("harness_config.py", 79), ("harness_config_v3.py", 66), ("harness_config_base.py", 47)):
         cfg = open(os.path.join(here, "groot", name)).read()
         keys = list(modality_json(dim)["state"])
-        assert f"modality_keys={json.dumps(keys)}" in cfg.replace("'", '"'), name
+        flat = " ".join(cfg.replace("'", '"').split()).replace("[ ", "[").replace(", ]", "]")
+        assert f"modality_keys={json.dumps(keys)}" in flat, name
         for key in ["motion", "scene", "wrist", "annotation.human.task_description"]:
             assert f'"{key}"' in cfg
 

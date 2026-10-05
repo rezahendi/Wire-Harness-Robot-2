@@ -199,15 +199,42 @@ could not set up F3 is skipped), success = wire seated, released and cleared:
 | model | demos | state | steps | routed |
 |---|---|---|---|---|
 | `route_v1` | 403 | base (47) | 6,000 | 11/59 (19%) |
-| `route_v2` | 1,165 (762 with recovery pushes, end hold) | base (47) | 12,000 | 10/59 (17%); re-planning every 0.2 s: 8/59 |
+| `route_v2` | 1,165 (762 with recovery pushes, end hold) | base (47) | 12,000 | 10/59 (17%); again: 14/59; re-planning every 0.2 s: 8/59 |
+| `route_v3` | 1,250 with pushes and hold | v3 (66) | 12,000 | **19/59 (32%)** |
+| `route_v3`, chunk every 4 steps, ensembled | | | | 20/59 (34%), no protective stop |
+| `route_v3`, ensembled + up to 2 restarts in 60 s | | | | **23/59 (39%)** |
+| `route_v3`, 8 denoising steps | | | | 13/59 |
+| `route_v3_sd0`: the same demos, state dropout off | | v3 (66) | 12,000 | 15/59; with restarts 18/59 |
 
 Successful trials take ~15 s, like the expert, at ~190 ms per action chunk with 4 workers.
-Three times the demos, recovery pushes included, changed nothing, so data volume is not the
-limit. Where `route_v1` fails (59 trials): the wire is in the hand in 35, lifted in 27, carried
-over the slot in 26, inside the slot in 11. Both losses, grasping and seating, are precision
-steps: with the base state the policy has to work out millimetre offsets from table
-coordinates and 8 wire points 8 cm apart. `route_v3` adds that geometry measured from the
-gripper (route, wire and slot keys below).
+The same model runs differ by about 4 successes in 59 (`route_v2`: 10 and 14), so read the
+table with that in mind.
+
+What changed things was the state, not the amount of data. Three times the demos, recovery
+pushes included, changed nothing (`route_v1` to `route_v2`). The gripper-relative geometry of
+`route_v3` (route, wire and slot keys) took seating from 38-56% of the wires carried over the
+slot to 77%, and halved the contact force. Ensembling overlapping chunks steadies the motion
+(more grasps, no protective stops); restarts rarely save a trial (3 of 39). More denoising
+steps and switching GR00T's state dropout off both made things worse.
+
+Where `route_v3` still fails, from its step-by-step trajectories and the test boards rebuilt
+in simulation:
+
+* Grasp (most failures): the policy closes the gripper at nearly the same spot on every
+  board; its grasp points spread half as much as the expert's (8 vs 17.5 mm on F1). Where the
+  wire lies there it holds it (5 mm finger gap); where it lies 15-26 mm to the side the fingers
+  close on nothing. The policy does not work out where along the wire to grasp from 8 coarse
+  wire points.
+* Seat (F1 mostly): the tool presses down 4-5 cm past the fork instead of the expert's 7-9 cm,
+  lower than the seating height, while the wire pulls little; the wire then rests on the lips
+  at the prong tops and never snaps in. The expert keeps moving away from the fork until the
+  wire pulls back, so the wire is taut over the slot.
+
+`route_v5` (state v4) gives the policy the expert's plan, made once from the same perception at
+the start of the skill: where on the wire to grasp, the wire's pull along the route, the
+seating height and the planned holding distance (pick and seat keys below). The funnel's
+"wire in hand" now means the fingers stopped on the wire (2-9 mm apart), not just closed next
+to it.
 
 Copy results home from WSL:
 
@@ -258,6 +285,8 @@ route_v3b`; `EXTRA_TRAIN_ARGS="--tune-visual"` also fine-tunes the vision encode
 `DATASET=~/data/route_v3` trains on a packaged set without recording one (and reuses its
 `_val` set), for trying training settings on the same demos, e.g. `DATASET=~/data/route_v3
 EXTRA_TRAIN_ARGS="--state-dropout-prob 0.0" BASELINE="" bash .../groot_round.sh route_v3_sd0`.
+At the end the round runs `groot_evals.sh` variants of the new checkpoint (`VARIANTS`, `ens4` by
+default) and compares with `route_v3/checkpoint-12000` (`BASELINE`).
 When it prints "round finished",
 stop the VM in the console: shutting it down from inside makes Nebius restart it and keep
 charging.
@@ -285,15 +314,23 @@ bash ~/Wire-Harness-Robot-2/scripts/groot_evals.sh route_v3
 
 ## What the policy sees and does
 
-Defined in `harness_agent/harness_agent/groot_features.py`, matched by `groot/harness_config.py`:
+Defined in `harness_agent/harness_agent/groot_features.py`, matched by `groot/harness_config.py`
+(`harness_config_v3.py` and `harness_config_base.py` for the older layouts;
+`python -m harness_agent.groot_data config-for <set>` names the right one, and the round script
+uses it):
 
 * video: `scene` (fixed camera over the board) and `wrist`, 256 x 256
-* state (66): TCP pose, commanded lead, gripper opening, force/torque, the target fork's CAD
-  pose and the point the wire is fixed at before it, 8 perceived wire keypoints (the base 47,
-  all that `route_v1`/`route_v2` saw), plus geometry measured from the gripper: its position in
-  the target fork's route frame, the nearest perceived wire point in the gripper frame, and
-  where the wire crosses the slot, each coarse and fine (tanh of a 1 cm or 5 mm scale). The
-  runner asks the served model which keys it was trained with, so older checkpoints still run.
+* state (79, layout v4): TCP pose, commanded lead, gripper opening, force/torque, the target
+  fork's CAD pose and the point the wire is fixed at before it, 8 perceived wire keypoints (the
+  base 47, all that `route_v1`/`route_v2` saw); geometry measured from the gripper: its position
+  in the target fork's route frame, the nearest perceived wire point in the gripper frame, and
+  where the wire crosses the slot (v3, 66, `route_v3`); and the gripper against the skill's plan
+  (`harness_core.expert.plan_route`, made once when the skill starts, as the expert makes it):
+  the planned grasp point on the wire in the gripper frame, the wire's pull along the route,
+  the tool height against the seating height and the distance past the fork against the planned
+  one. Offsets are coarse and fine (tanh of a 1 cm, 5 mm or 5 N scale). The runner asks the
+  served model which keys it was trained with, so older checkpoints still run; recordings keep
+  the perception behind every state (`raw/`), so a later layout can be computed from them.
 * action (5, 20 Hz, chunks of 16, 8 executed per call): TCP step and yaw step for the
   admittance controller, gripper command
 * language: "route the wire into fork F1/F2/F3"
