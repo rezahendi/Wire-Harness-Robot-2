@@ -14,8 +14,16 @@
 #   steps8    8 denoising steps per chunk instead of 4 (a copy of the checkpoint's config.json
 #             next to links to its weights)
 #   best      ens4 and restarts together, with videos
+#   assist    ens4, and when the policy has held the wire lined up over the slot for 1.5 s without
+#             getting it in (or starts to let go there), the expert's force-controlled seating
+#             takes over (a hybrid; the summary counts what the policy did alone)
+#   assist_best  assist and restarts together, with videos
+#   takeovers ens4 + assist on training boards (TAKEOVER_SEEDS, 8000-8199), every successful
+#             takeover saved as a training episode (~/eval/<name>_takeovers/takeovers: DAgger-style
+#             data for the next round; add it with groot_data merge)
 # Settings: STEPS (12000), CKPT (~/ckpt/<name>/checkpoint-STEPS), EVAL_SEEDS (0-19),
-# EVAL_WORKERS (4), FORKS (F1,F2,F3), PORT (5556). About 2 hours for all four. Logged to ~/rounds/<name>_evals.log.
+# EVAL_WORKERS (4), FORKS (F1,F2,F3), PORT (5556), ASSIST (1.5 s), TAKEOVER_SEEDS (8000-8199).
+# About 30 min per variant on 20 boards. Logged to ~/rounds/<name>_evals.log.
 set -euo pipefail
 
 NAME="${1:-route_v3}"
@@ -23,6 +31,8 @@ STEPS="${STEPS:-12000}"
 CKPT="${CKPT:-$HOME/ckpt/$NAME/checkpoint-$STEPS}"
 VARIANTS="${VARIANTS:-ens4 restarts best steps8}"
 EVAL_SEEDS="${EVAL_SEEDS:-0-19}"
+ASSIST="${ASSIST:-1.5}"
+TAKEOVER_SEEDS="${TAKEOVER_SEEDS:-8000-8199}"
 EVAL_WORKERS="${EVAL_WORKERS:-4}"
 FORKS="${FORKS:-F1,F2,F3}"
 PORT="${PORT:-5556}"
@@ -113,34 +123,42 @@ PY
     echo "$dir"
 }
 
-evaluate() {   # evaluate <out folder> <groot_eval options...>
-    local out="$1"
-    shift
+evaluate() {   # evaluate <out folder> <seeds> <groot_eval options...>
+    local out="$1" seeds="$2"
+    shift 2
     if [ -f "$out/summary.md" ]; then
         say "evaluation $out: done before"
         return
     fi
-    say "evaluation -> $out ($*)"
-    python -m harness_agent.groot_eval --port "$PORT" --forks "$FORKS" --seeds "$EVAL_SEEDS" \
+    say "evaluation -> $out (seeds $seeds, $*)"
+    python -m harness_agent.groot_eval --port "$PORT" --forks "$FORKS" --seeds "$seeds" \
         --workers "$EVAL_WORKERS" --out "$out" "$@"
 }
 
 for v in $VARIANTS; do
     out="$HOME/eval/${NAME}_$v"
     case "$v" in
-        ens4)     serve "$CKPT"; evaluate "$out" --execute-horizon 4 --ensemble 0.1 --trajectories ;;
-        restarts) serve "$CKPT"; evaluate "$out" --execute-horizon 8 --restarts 2 --max-seconds 60 ;;
-        best)     serve "$CKPT"; evaluate "$out" --execute-horizon 4 --ensemble 0.1 --restarts 2 --max-seconds 60 \
-                      --trajectories --video ;;
-        steps8)   dir="$(denoise_copy 8)"; serve "$dir"; evaluate "$out" --execute-horizon 8 ;;
-        *)        echo "unknown variant $v (ens4, restarts, steps8, best)"; exit 1 ;;
+        ens4)     serve "$CKPT"; evaluate "$out" "$EVAL_SEEDS" --execute-horizon 4 --ensemble 0.1 --trajectories ;;
+        restarts) serve "$CKPT"; evaluate "$out" "$EVAL_SEEDS" --execute-horizon 8 --restarts 2 --max-seconds 60 ;;
+        best)     serve "$CKPT"; evaluate "$out" "$EVAL_SEEDS" --execute-horizon 4 --ensemble 0.1 --restarts 2 \
+                      --max-seconds 60 --trajectories --video ;;
+        steps8)   dir="$(denoise_copy 8)"; serve "$dir"; evaluate "$out" "$EVAL_SEEDS" --execute-horizon 8 ;;
+        assist)   serve "$CKPT"; evaluate "$out" "$EVAL_SEEDS" --execute-horizon 4 --ensemble 0.1 \
+                      --seat-assist "$ASSIST" --trajectories ;;
+        assist_best) serve "$CKPT"; evaluate "$out" "$EVAL_SEEDS" --execute-horizon 4 --ensemble 0.1 \
+                      --seat-assist "$ASSIST" --restarts 2 --max-seconds 60 --trajectories --video ;;
+        takeovers) serve "$CKPT"; evaluate "$out" "$TAKEOVER_SEEDS" --execute-horizon 4 --ensemble 0.1 \
+                      --seat-assist "$ASSIST" --record-takeovers ;;
+        *)        echo "unknown variant $v (ens4, restarts, steps8, best, assist, assist_best, takeovers)"; exit 1 ;;
     esac
 done
 stop_server
 
 say "results"
 for f in "$HOME/eval/$NAME/summary.md" "$HOME/eval/${NAME}"_*/summary.md; do
-    if [ -f "$f" ]; then echo "== $f"; sed -n '3,8p' "$f"; grep -E "^Restarts" "$f" || true; fi
+    if [ -f "$f" ]; then echo "== $f"; sed -n '3,8p' "$f"; grep -E "^(Restarts|Seat assist)|takeover episodes" "$f" || true; fi
 done
 say "evaluations finished. Results: ~/eval/${NAME}_*   Log: $LOG"
-echo "Stop the VM in the Nebius console now (Compute > Virtual machines > Stop)."
+if [ -z "${QUIET_END:-}" ]; then
+    echo "Stop the VM in the Nebius console now (Compute > Virtual machines > Stop)."
+fi

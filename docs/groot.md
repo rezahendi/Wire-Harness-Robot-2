@@ -190,6 +190,20 @@ Two options change how the same checkpoint is run, without retraining:
 - `--trajectories`: every trial's step-by-step record in `trajectories/<fork>_seed<NNN>.json`
   (time, tool position and yaw, gripper opening, force, where the wire crosses the slot plane,
   inside or not, and the action sent), for looking at what the policy does where it fails.
+- `--seat-assist SECONDS` (e.g. `1.5`), a hybrid: when the policy has held the wire lined up
+  over the slot, low, for that long in all without getting it in, or starts to open the
+  gripper there, the expert's force-controlled seating takes over (`seat_from_here`: turn the
+  gripper so the wire leaves it along the route, lift a wire that lies on a prong clear and
+  line it up again, lower it beyond the fork, centre it, ramp the tension, wiggle it past the
+  lips, let go, back off). The summary says how many trials were handed over and how many the
+  policy routed alone; report the two apart.
+- `--record-takeovers` (with `--seat-assist`): every successful takeover is also saved as a
+  training episode in `<out>/takeovers` (camera views, states and the expert's actions,
+  starting from the policy's own stuck state, ending with a second's stand-still). That is
+  DAgger-style data: the demos the policy is missing are the ones from the states it gets
+  itself into. Run it on training boards (e.g. `--seeds 8000-8199`), never on 0-99, and add
+  the folder to the next set: `groot_data merge ~/data/route_v5 <out>/takeovers ... --out
+  ~/data/route_v6`.
 
 ### Results so far
 
@@ -235,6 +249,34 @@ the start of the skill: where on the wire to grasp, the wire's pull along the ro
 seating height and the planned holding distance (pick and seat keys below). The funnel's
 "wire in hand" now means the fingers stopped on the wire (2-9 mm apart), not just closed next
 to it.
+
+On 40 test boards (seeds 0-39, 119 trials):
+
+| model | routed | protective stops | in hand / lifted / over the slot / inside / released |
+|---|---|---|---|
+| `route_v3` | 41/119 (34%) | 8 | 92 / 68 / 59 / 44 / 41 |
+| `route_v5` (1,288 demos, state v4, 12,000 steps) | 53/119 (45%) | 10 | 101 / 100 / 95 / 63 / 54 |
+| `route_v5`, chunk every 4 steps, ensembled | **69/119 (58%)**: F1 20/40, F2 26/40, F3 23/39 | 2 | 111 / 108 / 103 / 71 / 70 |
+
+Trial by trial, `route_v5` routed 32 wires `route_v3` did not and missed 20 it did; the
+ensembled run beat the plain one 34 to 18. The plan keys fixed the grasp (wire in hand in 111
+of 119 trials, from 92). What is left is the seat: in 32 trials the policy brings the wire
+over the slot, low, and it ends up resting on the lips at the prong tops (60-63 mm up), 2-10 mm
+off the slot centre, the tool pulling 15-30 N; after 2-7 s there the policy opens the gripper.
+Of the 50 failed trials, 31 had the wire held, lined up and low at some point; a successful
+seat goes in 0.05-1.65 s after that (median 0.55 s; 4 of 69 took longer).
+
+The expert can finish those seats. The simulator is deterministic, so replaying the policy's
+recorded actions on the same board reproduces its trial to 0.1-0.5 mm; replayed up to where
+the seat assist would take over (1.5 s stuck, or the gripper starting to open) and handed to
+the expert, the assist takes over in 27 of the 50 failed trials and the expert seats 26 of
+those wires: the hybrid would route about 95 of 119 (80%) where the policy alone routes 69 (to
+be confirmed in closed loop: `--seat-assist 1.5`). What the expert needed from a policy's
+stuck state, beyond its own seating: turning the gripper back to the route (the policy holds
+it ~10 degrees off, the stiff wire leaves the fingers skewed, and centring it at the fork then
+takes a 12 mm sideways offset that crosses a fork turned 25 degrees too steeply to pass the
+lips), and lifting a wire that lies on a prong clear before lining up again. The one it cannot finish: a wire grasped so far
+from the fork that it stays slack at the longest holding distance (it would need a new grasp).
 
 Copy results home from WSL:
 
@@ -292,15 +334,42 @@ stop the VM in the console: shutting it down from inside makes Nebius restart it
 charging.
 
 `scripts/groot_evals.sh` then runs the trained checkpoint in other ways on the same boards, no
-retraining (~2 h, `~/eval/<name>_<variant>`): `ens4` (a chunk every 4 steps, ensembled, with
-trajectories), `restarts` (up to 2 fresh starts after a stalled try, 60 s), `best` (both, with
-videos) and `steps8` (8 denoising steps instead of 4: a copy of `config.json` next to links to
-the weights).
+retraining (~30 min per variant on 20 boards, `~/eval/<name>_<variant>`): `ens4` (a chunk
+every 4 steps, ensembled, with trajectories), `restarts` (up to 2 fresh starts after a stalled
+try, 60 s), `best` (both, with videos), `steps8` (8 denoising steps instead of 4: a copy of
+`config.json` next to links to the weights), `assist` (ens4 with the seat assist after 1.5 s:
+the hybrid), `assist_best` (assist with restarts and videos) and `takeovers` (ens4 + assist on
+200 training boards, `TAKEOVER_SEEDS=8000-8199`, recording every takeover as a training
+episode for the next round).
 
 ```bash
 tmux new -s evals
 bash ~/Wire-Harness-Robot-2/scripts/groot_evals.sh route_v3
+# the hybrid and the DAgger-style data for the next round, on 40 test boards:
+EVAL_SEEDS=0-39 EVAL_WORKERS=6 VARIANTS="assist assist_best takeovers" \
+    bash ~/Wire-Harness-Robot-2/scripts/groot_evals.sh route_v5
 ```
+
+`scripts/groot_dagger.sh` does all of it in one go, unattended (~11 h): the current model
+with the seat assist on the 40 test boards (alone and with restarts), takeovers recorded on
+200 training boards, then the next round on the current model's set + the takeovers + 400
+new builds (30% seat recoveries), 20,000 steps, evaluated alone and with the assist. Each
+step carries on after a preempted VM when the same command is run again (an interrupted
+evaluation keeps its finished trials).
+
+```bash
+tmux new -s night
+bash ~/Wire-Harness-Robot-2/scripts/groot_dagger.sh route_v5 route_v6
+```
+
+The next round then trains on the earlier set, the takeovers and new demos together:
+`BASE="~/data/route_v5 ~/eval/route_v5_takeovers/takeovers"` (sets with the same state
+layout, listed before the new recording). `SEAT_RECOVERIES=0.3` records 30% of the new
+routes as seat recoveries: after the carry the tool comes down off the slot (3-12 mm to the
+side, closer or lower than the expert would, turned up to 15 degrees; not recorded) and the
+episode is the expert seating the wire from there. Pushes while the expert seats would not do
+this: its descent snaps the wire in, the seating phase lasts a quarter second, and it undoes
+a push within one step.
 
 ## Troubleshooting
 

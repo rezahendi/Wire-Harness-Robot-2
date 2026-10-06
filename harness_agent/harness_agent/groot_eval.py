@@ -13,6 +13,12 @@ to it. Writes results.jsonl and summary.md (success rate with a 95% Wilson inter
 Trials run in --workers processes that share the one policy server. The server answers one
 request at a time, so with several workers the round trip per action chunk includes waiting
 in line; the simulator, not the GPU, is usually the bottleneck.
+
+--seat-assist hands a held wire that is stuck on the prongs to the expert's force-controlled
+seating (a hybrid, reported as such). With --record-takeovers every successful takeover is
+also saved as a training episode in <out>/takeovers (DAgger-style: the expert's actions from
+the policy's own stuck states); run it on training seeds (e.g. 8000-8299), not on 0-99, and
+add the folder to the next set with ``groot_data merge``.
 """
 
 from __future__ import annotations
@@ -77,6 +83,8 @@ def run_trial(spec, seed: int, fork: str, runner, video_dir: Optional[str] = Non
                         "fork_distance_mm": runner.last.get("fork_distance_mm")})
             if runner.restarts:
                 out.update({"tries": runner.last.get("tries", 1), "stalls": list(runner.last.get("stalls") or [])})
+            if runner.seat_assist is not None:
+                out["assists"] = list(runner.last.get("assists") or [])
         if video_dir is not None and session.frames:
             import imageio
             os.makedirs(video_dir, exist_ok=True)
@@ -116,7 +124,8 @@ def _init_worker(opts: Dict[str, Any]) -> None:
                                         execute_horizon=opts["execute_horizon"], max_seconds=opts["max_seconds"],
                                         ensemble_decay=opts.get("ensemble"),
                                         record_trajectory=bool(opts.get("trajectories")),
-                                        restarts=int(opts.get("restarts") or 0))
+                                        restarts=int(opts.get("restarts") or 0),
+                                        seat_assist=opts.get("seat_assist"))
 
 
 def _close_worker() -> None:
@@ -127,11 +136,27 @@ def _close_worker() -> None:
     _WORKER.clear()
 
 
+def takeover_writer(folder: str, seed: int, fork: str):
+    """A GrootRunner takeover_sink: each successful takeover becomes one staged episode in
+    ``folder``/staging, in the recorder's format (``groot_data merge`` packages it)."""
+    from .groot_data import write_episode
+    count = {"n": 0}
+
+    def sink(ep, info: Dict[str, Any]) -> None:
+        count["n"] += 1
+        write_episode(ep, os.path.join(folder, "staging", f"t{seed:06d}_{fork}_{count['n']:02d}"), {
+            "seed": seed, "order": 100 + count["n"], "skill": ep.skill, "target": ep.target, "attempt": 0,
+            "scenario": "takeover", "outcome": "routed", "takeover_t": info.get("t"), "takeover_why": info.get("why")})
+    return sink
+
+
 def _trial(task: Tuple[int, str, Optional[int]]) -> Dict[str, Any]:
     seed, fork, episode = task
     opts = _WORKER["opts"]
     t0 = time.perf_counter()
     try:
+        if opts.get("takeover_dir") and _WORKER["runner"] is not None:
+            _WORKER["runner"].takeover_sink = takeover_writer(opts["takeover_dir"], seed, fork)
         row = run_trial(_WORKER["spec"], seed, fork, _WORKER["runner"], opts["video_dir"], replay_episode=episode)
         runner = _WORKER["runner"]
         if opts.get("traj_dir") and runner is not None and runner.last.get("trajectory") and "ok" in row:
@@ -181,6 +206,18 @@ def summarize(rows: List[Dict[str, Any]], title: str) -> str:
         lines += ["", f"Restarts: {len(tried)} trials started over ({sum(r['tries'] - 1 for r in tried)} restarts: "
                       + (", ".join(f"{k} {v}" for k, v in sorted(why.items(), key=lambda x: -x[1])) or "none")
                       + f"); {sum(r['ok'] for r in tried)} of them routed the wire on a later try."]
+    if any("assists" in r for r in rows):
+        handed = [r for r in rows if r.get("assists")]
+        why: Dict[str, int] = {}
+        for r in handed:
+            for a in r["assists"]:
+                why[a["why"]] = why.get(a["why"], 0) + 1
+        seated = sum(1 for r in handed if any(a.get("ok") for a in r["assists"]))
+        lines += ["", f"Seat assist (a hybrid): {len(handed)} trials handed the wire to the expert's seating ("
+                      + (", ".join(f"{k} {v}" for k, v in sorted(why.items(), key=lambda x: -x[1])) or "none")
+                      + f"); it seated {seated} of them. Routed without the expert's help: "
+                      + f"{sum(r['ok'] for r in rows if 'ok' in r and not r.get('assists'))}/"
+                      + f"{sum(1 for r in rows if 'ok' in r)}."]
     fails: Dict[str, int] = {}
     for r in rows:
         if "ok" in r and not r["ok"]:
@@ -246,6 +283,13 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help="after a stalled try (let go outside the slot, no progress for 12 s) open the gripper, "
                          "lift the tool and let the policy start over, up to N times within --max-seconds "
                          "(try --restarts 2 --max-seconds 60)")
+    ap.add_argument("--seat-assist", type=float, default=None, metavar="SECONDS",
+                    help="hybrid: when the policy has held the wire lined up over the slot this long without getting "
+                         "it in, or starts to let go there, the expert's force-controlled seating finishes the job "
+                         "(try 1.5)")
+    ap.add_argument("--record-takeovers", action="store_true",
+                    help="with --seat-assist: save every successful takeover as a training episode in "
+                         "<out>/takeovers (use training seeds, e.g. 8000-8299)")
     ap.add_argument("--timeout", type=float, default=120.0, help="seconds to wait for one answer from the server")
     ap.add_argument("--expert", action="store_true", help="run the expert on the same trials (baseline)")
     ap.add_argument("--trajectories", action="store_true",
@@ -260,6 +304,10 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     forks = [f.strip() for f in args.forks.split(",") if f.strip()]
     seeds = _parse_seeds(args.seeds)
+    if args.record_takeovers and args.seat_assist is None:
+        raise SystemExit("--record-takeovers needs --seat-assist SECONDS")
+    if args.record_takeovers and any(s < 100 for s in seeds):
+        print("warning: seeds 0-99 are the test boards; episodes recorded on them must not go into training")
     os.makedirs(args.out, exist_ok=True)
     if not args.expert:
         from .groot_client import GrootClient
@@ -283,33 +331,48 @@ def main(argv: Optional[List[str]] = None) -> int:
                 print(f"seed {seed:3d} {fork}: no recorded episode to replay, skipped")
                 continue
             tasks.append((seed, fork, episode_of.get((seed, fork)) if args.replay_dataset else None))
-    workers = max(1, min(args.workers, len(tasks)))
+    results_path = os.path.join(args.out, "results.jsonl")
+    kept: List[Dict[str, Any]] = []
+    if os.path.exists(results_path) and not os.path.exists(os.path.join(args.out, "summary.md")):
+        with open(results_path) as f:          # an interrupted run (preempted VM): keep its finished trials
+            kept = [r for r in (json.loads(line) for line in f if line.strip()) if "error" not in r]
+        done = {(int(r["seed"]), r["fork"]) for r in kept}
+        tasks = [t for t in tasks if (t[0], t[1]) not in done]
+        if kept:
+            print(f"resuming: {len(kept)} trials were finished before, {len(tasks)} to go")
+    workers = max(1, min(args.workers, max(1, len(tasks))))
     if args.replay_dataset and workers > 1:
         print("replay mode runs one trial at a time (the server replays one episode at a time)")
         workers = 1
     opts = {"spec": _spec_path(args.spec), "expert": args.expert, "host": args.host, "port": args.port,
             "timeout_ms": int(1000 * args.timeout), "forks": forks, "execute_horizon": args.execute_horizon,
             "max_seconds": args.max_seconds, "ensemble": args.ensemble, "trajectories": args.trajectories,
-            "restarts": args.restarts,
+            "restarts": args.restarts, "seat_assist": args.seat_assist,
+            "takeover_dir": os.path.join(args.out, "takeovers") if args.record_takeovers else None,
             "traj_dir": os.path.join(args.out, "trajectories") if args.trajectories else None,
             "video_dir": os.path.join(args.out, "videos") if args.video else None,
             "pool": workers > 1}
     who = "expert" if args.expert else "GR00T" + (
         f" (chunk every {args.execute_horizon} steps, ensembled, decay {args.ensemble:g})" if args.ensemble is not None
         else f" ({args.execute_horizon} steps per chunk)") + (
-        f", up to {args.restarts} restarts in {args.max_seconds:g} s" if args.restarts else "")
+        f", up to {args.restarts} restarts in {args.max_seconds:g} s" if args.restarts else "") + (
+        f", seat assist after {args.seat_assist:g} s" if args.seat_assist is not None else "")
     print(f"{len(tasks)} trials with {who} on {workers} worker{'s' if workers > 1 else ''} -> {args.out}", flush=True)
 
-    rows: List[Dict[str, Any]] = []
+    rows: List[Dict[str, Any]] = list(kept)
+    total = len(kept) + len(tasks)
     t0 = time.perf_counter()
-    results_path = os.path.join(args.out, "results.jsonl")
     lost = {"in_a_row": 0}
     with open(results_path, "w") as f:
+        for row in kept:
+            f.write(json.dumps(row) + "\n")
+        f.flush()
+
         def emit(row: Dict[str, Any]) -> None:
             rows.append(row)
             f.write(json.dumps(row) + "\n")
             f.flush()
-            print(f"[{len(rows)}/{len(tasks)}] seed {row['seed']:3d} {row['fork']}: {_state(row)}", flush=True)
+            print(f"[{len(rows)}/{total}] seed {row['seed']:3d} {row['fork']}: {_state(row)}", flush=True)
             lost["in_a_row"] = lost["in_a_row"] + 1 if "GrootError" in row.get("error", "") else 0
             if lost["in_a_row"] >= 3:
                 raise _ServerGone(f"the policy server stopped answering ({row['error']})")
@@ -329,9 +392,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                     for row in pool.imap_unordered(_trial, tasks):
                         emit(row)
         except KeyboardInterrupt:
-            print(f"\nstopped after {len(rows)} of {len(tasks)} trials; the summary covers those")
+            print(f"\nstopped after {len(rows)} of {total} trials; the summary covers those")
         except _ServerGone as exc:
-            print(f"\n{exc}; stopped after {len(rows)} of {len(tasks)} trials")
+            print(f"\n{exc}; stopped after {len(rows)} of {total} trials")
 
     order = {f: i for i, f in enumerate(forks)}
     rows.sort(key=lambda r: (r["seed"], order.get(r["fork"], 99)))
@@ -344,6 +407,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     lat = latency_line(rows, workers)
     if lat:
         text += "\n" + lat
+    if args.record_takeovers:
+        from .groot_data import episodes_in
+        tdir = os.path.join(args.out, "takeovers")
+        n_ep = len(episodes_in(tdir)[1]) if os.path.isdir(tdir) else 0
+        text += (f"\n{n_ep} takeover episodes in {tdir} (add them to a training set with "
+                 f"`python -m harness_agent.groot_data merge <set> {tdir} --out <new set>`).\n")
     text += f"\nWall time {time.perf_counter() - t0:.0f} s for {len(rows)} trials on {workers} worker(s).\n"
     with open(os.path.join(args.out, "summary.md"), "w") as f:
         f.write(text)

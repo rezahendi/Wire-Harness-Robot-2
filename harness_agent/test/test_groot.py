@@ -315,6 +315,212 @@ def test_a_stalled_try_is_cleared_and_started_over(monkeypatch):
     assert runner.last["tries"] == 1 and not session.cleared
 
 
+def _stuck_on_the_prongs(t, y=0.004):
+    """A wire held over fork F1's slot, resting on the prongs (60 mm up, ``y`` off the slot), the
+    tool low beyond the fork; fork at (0.5, 0, board 0), the wire along x."""
+    cable = np.linspace([0.3, y, 0.06], [0.62, y, 0.06], 33)
+    return dict(fake_obs(yaw=0.0), board_z=np.array([0.0]), time=np.array([t]), cable=cable,
+                forks=np.array([[0.5, 0.0, 0.0, 0.0]]), gripper=np.array([0.006]),
+                tcp_pos=np.array([0.58, y, 0.05]), target_pos=np.array([0.58, y, 0.05]))
+
+
+class _SeatingExpert:
+    """Stands in for the expert's seat_from_here: after ``steps`` steps the wire is in the slot,
+    the gripper open and the tool up."""
+
+    def __init__(self, session, steps=20, works=True):
+        self.session, self.steps, self.works = session, steps, works
+        self.p, self._grip, self.calls = None, -1.0, []
+
+    def _hold(self):
+        return np.array([0.0, 0.0, 0.0, 0.0, self._grip])
+
+    def seat_from_here(self, i):
+        self.calls.append((i, self._grip))
+        for k in range(self.steps):
+            obs = yield np.array([0.0, 0.1, -0.1, 0.0, self._grip])
+            if k == self.steps // 2 and self.works:
+                self.session.inside = True
+        self._grip = -1.0
+        return self.works
+
+
+def test_the_seat_assist_takes_over_a_wire_stuck_on_the_prongs(monkeypatch):
+    from harness_agent.groot_skill import ASSIST_LETGO, GrootRunner
+
+    class FakeSession:
+        cfg, route = _Cfg, ["F1"]
+
+        def __init__(self):
+            self.inside = False
+            self.obs = _stuck_on_the_prongs(0.0)
+            self.expert = _SeatingExpert(self)
+
+        def _clear_board(self):
+            yield np.zeros(5)
+            return True
+
+    def run(seconds, assist, grip=1.0, works=True, sink=None, restarts=0):
+        session = FakeSession()
+        session.expert.works = works
+        runner = GrootRunner(client=None, seat_assist=assist, takeover_sink=sink, restarts=restarts)
+        monkeypatch.setattr(runner, "_chunk", lambda *a: np.tile([0.0, 0.0, 0.0, 0.0, grip], (16, 1)))
+        monkeypatch.setattr(runner, "cameras", lambda s: type("Cams", (), {"render": lambda self, d: {
+            k: np.zeros((8, 8, 3), np.uint8) for k in gf.VIDEO_KEYS}})())
+        session.env = type("Env", (), {"cell": type("Cell", (), {"sim": type("Sim", (), {"data": None})})})
+        gen = runner.route_fork(session, 0)
+        next(gen)
+        done = None
+        for k in range(int(round(seconds / 0.05))):
+            t = (k + 1) * 0.05
+            obs = _stuck_on_the_prongs(t)
+            if session.inside:                                  # in the slot, released, tool up
+                obs.update(cable=np.linspace([0.3, 0.0, 0.03], [0.62, 0.0, 0.03], 33), gripper=np.array([0.05]),
+                           tcp_pos=np.array([0.58, 0.0, 0.15]))
+            session.obs = obs
+            try:
+                gen.send(obs)
+            except StopIteration as stop:
+                done = stop.value
+                break
+        gen.close()
+        return runner, session, done
+
+    runner, session, done = run(10.0, assist=None)                 # off: the policy keeps pressing
+    assert done is None and "assists" not in runner.last and not session.expert.calls
+    episodes = []
+    runner, session, done = run(10.0, assist=1.5, sink=lambda ep, info: episodes.append((ep, info)))
+    assert done is True and session.expert.calls == [(0, 1.0)]     # the fingers stay closed on the wire
+    a = runner.last["assists"]
+    assert len(a) == 1 and a[0]["why"] == "stuck" and a[0]["ok"] and abs(a[0]["t"] - 1.5) < 0.11
+    assert runner.last["milestones"]["inside"] > 1.5 and runner.last["furthest"] == "released"
+    ep, info = episodes[0]
+    assert info["ok"] and len(ep) == 20 + gf.FPS and len(ep.states[0]) == gf.STATE_DIM   # seating + a second's hold
+    assert ep.target == "F1" and np.allclose(ep.actions[0], [0.0, 0.1, -0.1, 0.0, 1.0])
+    runner, session, done = run(10.0, assist=5.0, grip=ASSIST_LETGO - 0.2)   # starts to let go: taken over at once
+    assert done is True and runner.last["assists"][0]["why"] == "letting go" and runner.last["assists"][0]["t"] < 0.2
+    runner, session, done = run(20.0, assist=1.5, works=False)     # the expert fails too: the policy carries on
+    assert done is None and len(runner.last["assists"]) == 1 and not runner.last["assists"][0]["ok"]
+    runner, session, done = run(20.0, assist=1.5, works=False, restarts=1)   # ... or, with restarts, starts over
+    assert runner.last["stalls"][0]["why"] == "seat assist failed"
+
+
+def test_the_expert_seats_a_wire_handed_over_off_the_slot():
+    """The expert's own route to F1, stopped as the descent starts; the tool is moved 1 cm sideways
+    and down, so the wire comes down beside the fork; seat_from_here lifts it clear, lines it up
+    again and seats it."""
+    from harness_agent.session import CellSession
+    from harness_agent.spec import HarnessSpec
+    from harness_core.perception import cable_crossing_in_fork
+    spec_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "specs")
+    s = CellSession(HarnessSpec.from_yaml(os.path.join(spec_dir, "demo_3fork.yaml")), seed=1003, randomize=True)
+    try:
+        s.status()
+        ex, cfg = s.expert, s.cfg
+        bz = float(s.obs["board_z"][0])
+        seen = {}
+
+        def handover():
+            gen = ex._route_fork(0)
+            a = next(gen)
+            while ex.phase != "route_descend":
+                obs = yield a
+                a = gen.send(obs)
+            gen.close()
+            _, _, _, n = ex._route_frame(0)
+            goal = ex._obs["tcp_pos"].copy()
+            goal[:2] += 0.010 * n
+            goal[2] = bz + 0.03
+            yaw = float(ex._obs["tcp_yaw"][0])
+            for _ in range(80):
+                if np.linalg.norm(ex._obs["target_pos"] - goal) < 0.001:
+                    break
+                yield ex._action_toward(ex._obs, goal, yaw, speed=0.08)
+            seen["before"] = cable_crossing_in_fork(ex._obs["cable"], ex._obs["forks"][0], cfg.fork, bz)
+            return (yield from ex.seat_from_here(0))
+
+        run = s._drive(handover(), budget=60.0)
+        chk = cable_crossing_in_fork(s.obs["cable"], s.obs["forks"][0], cfg.fork, bz)
+        assert abs(seen["before"]["y"]) > cfg.fork.slot_width / 2 and not seen["before"]["inside"]
+        assert run["value"] is True and chk["inside"]
+        assert any("lifting it clear" in m for m in run["messages"])
+    finally:
+        s.close()
+
+
+def test_takeovers_are_written_as_episodes_merge_keeps_apart(tmp_path):
+    from harness_agent.groot_data import EpisodeBuffer, episodes_in, merge
+    from harness_agent.groot_eval import summarize, takeover_writer
+    sink = takeover_writer(str(tmp_path / "eval" / "takeovers"), 8003, "F2")
+    ep = EpisodeBuffer("route_fork", "F2", lambda o: np.zeros(gf.STATE_DIM, np.float32))
+    obs = dict(fake_obs(), time=np.array([0.5]), board_z=np.array([0.0]))
+    for _ in range(5):
+        ep.add(obs, {k: np.zeros((64, 64, 3), np.uint8) for k in gf.VIDEO_KEYS}, np.ones(5))
+    sink(ep, {"t": 12.4, "why": "stuck", "ok": True})
+    kind, found, _ = episodes_in(str(tmp_path / "eval" / "takeovers"))
+    assert kind == "staging" and len(found) == 1
+    m = found[0]["meta"]
+    assert (m["seed"], m["target"], m["scenario"], m["takeover_why"], m["length"]) == (8003, "F2", "takeover",
+                                                                                       "stuck", 5)
+    _episode(tmp_path / "rec" / "staging", 8003, "F2", n=5)        # a recorded demo on the same board
+    res = merge([str(tmp_path / "rec"), str(tmp_path / "eval" / "takeovers")], str(tmp_path / "set"), size=64)
+    assert res["episodes"] == 2 and res["duplicates"] == 0
+    rows = [{"seed": 0, "fork": "F1", "ok": True, "outcome": "routed", "seconds": 14.0, "max_force_N": 9.0,
+             "truth_routed": True, "assists": []},
+            {"seed": 0, "fork": "F2", "ok": True, "outcome": "routed", "seconds": 19.0, "max_force_N": 9.0,
+             "truth_routed": True, "assists": [{"t": 12.0, "why": "stuck", "ok": True}]},
+            {"seed": 1, "fork": "F1", "ok": False, "outcome": "timeout", "seconds": 40.0, "max_force_N": 9.0,
+             "truth_routed": False, "assists": [{"t": 13.0, "why": "letting go", "ok": False}]}]
+    text = summarize(rows, "t")
+    assert "2 trials handed the wire to the expert's seating" in text and "it seated 1 of them" in text
+    assert "Routed without the expert's help: 1/3" in text
+
+
+def test_bad_descents_stay_in_their_ranges():
+    from harness_agent.groot_data import BAD_DESCENT, bad_descent
+    rng = np.random.default_rng(0)
+    bad = [bad_descent(rng) for _ in range(400)]
+    lat = np.array([b["lateral"] for b in bad]) * 1000.0
+    lo, hi = BAD_DESCENT["lateral_mm"]
+    assert np.all((np.abs(lat) >= lo) & (np.abs(lat) <= hi)) and (lat > 0).mean() > 0.4 and (lat < 0).mean() > 0.4
+    assert all(BAD_DESCENT["height_mm"][0] <= 1000 * b["height"] <= BAD_DESCENT["height_mm"][1] for b in bad)
+    assert all(abs(b["yaw"]) <= np.radians(BAD_DESCENT["yaw_deg"]) + 1e-9 for b in bad)
+
+
+@pytest.mark.skipif(not SLOW, reason="records a build with seat recoveries (~5 min); set HARNESS_SLOW_TESTS=1")
+def test_seat_recoveries_are_recorded_from_the_hand_over(tmp_path):
+    from harness_agent.groot_data import episodes_in, main as record_main
+    out = tmp_path / "rec"
+    assert record_main(["record", "--out", str(out), "--seeds", "1000", "--workers", "1", "--popped", "0",
+                        "--size", "64", "--seat-recoveries", "1.0", "--hold-after", "1.0"]) == 0
+    _, found, _ = episodes_in(str(out))
+    kinds = [it["meta"].get("kind") for it in found]
+    assert len(found) >= 2 and set(kinds) == {"seat_recovery"}
+    assert all(it["meta"]["length"] < 250 for it in found)          # from the hand-over, not the whole route
+
+
+def test_an_interrupted_evaluation_keeps_its_finished_trials(tmp_path, monkeypatch):
+    from harness_agent import groot_eval as ge
+    out = tmp_path / "eval"
+    out.mkdir()
+    old = [{"seed": 0, "fork": "F1", "ok": True, "outcome": "routed", "seconds": 14.0, "max_force_N": 9.0,
+            "truth_routed": True},
+           {"seed": 0, "fork": "F2", "error": "GrootError: no answer"}]            # crashed: run again
+    (out / "results.jsonl").write_text("".join(json.dumps(r) + "\n" for r in old))
+    ran = []
+
+    def fake_trial(task):
+        ran.append(task[:2])
+        return {"seed": task[0], "fork": task[1], "ok": False, "outcome": "timeout", "seconds": 40.0,
+                "max_force_N": 5.0, "truth_routed": False}
+
+    monkeypatch.setattr(ge, "_trial", fake_trial)
+    assert ge.main(["--expert", "--forks", "F1,F2", "--seeds", "0-1", "--out", str(out)]) == 0
+    assert ran == [(0, "F2"), (1, "F1"), (1, "F2")]
+    rows = [json.loads(line) for line in open(out / "results.jsonl")]
+    assert len(rows) == 4 and sum(r["ok"] for r in rows) == 1 and (out / "summary.md").exists()
+
+
 def test_recording_resumes_and_ctrl_c_packages_what_is_done(tmp_path, monkeypatch):
     from harness_agent import groot_data as gd
     calls = []

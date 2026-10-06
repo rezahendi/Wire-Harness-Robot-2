@@ -152,6 +152,11 @@ def main(argv: Optional[list] = None) -> int:
                     help="within one attempt, GR00T starts over after a stalled try up to N times (try 2)")
     ap.add_argument("--groot-seconds", type=float, default=None,
                     help="time limit of one GR00T attempt (default 40 s, 60 s with restarts)")
+    ap.add_argument("--groot-ensemble", type=float, default=None, metavar="DECAY",
+                    help="ask GR00T for a chunk every 4 steps and average the overlapping chunks (try 0.1)")
+    ap.add_argument("--groot-seat-assist", type=float, default=None, metavar="SECONDS",
+                    help="hybrid: the expert's seating takes over a wire GR00T holds stuck over the slot this long "
+                         "(try 1.5)")
     ap.add_argument("--out", default=None, help="output directory (default: runs/<spec>_<planner>_<seed>)")
     args = ap.parse_args(argv)
     if args.video or args.vision:
@@ -192,7 +197,9 @@ def main(argv: Optional[list] = None) -> int:
     if args.groot is not None and session.feasible:
         from .groot_skill import connect_runner
         runner = connect_runner(args.groot or None, args.groot_attempts, restarts=args.groot_restarts,
-                                max_seconds=args.groot_seconds or (60.0 if args.groot_restarts else 40.0))
+                                max_seconds=args.groot_seconds or (60.0 if args.groot_restarts else 40.0),
+                                seat_assist=args.groot_seat_assist, ensemble_decay=args.groot_ensemble,
+                                execute_horizon=4 if args.groot_ensemble is not None else 8)
         session.skill_runners["route_fork"] = runner
         print(f"  route_fork: {runner.name} on attempts {args.groot_attempts}, the expert otherwise")
 

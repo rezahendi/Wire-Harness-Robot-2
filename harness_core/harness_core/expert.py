@@ -518,7 +518,6 @@ class HarnessExpert:
             self._say(f"fork {i}: no reachable pick point on the wire")
             return False
         route_yaw = math.atan2(u[1], u[0])
-        n = np.array([-u[1], u[0]])
         yaw_ref = self._closest_yaw(route_yaw, float(obs["tcp_yaw"][0]))
         if not (yield from self._pick_wire(s_pick, yaw_ref, carry_yaw=route_yaw)):
             return False
@@ -539,11 +538,60 @@ class HarnessExpert:
             yield from self._goto(up, None, tol=0.01, timeout=3.0)
             return False
 
+        return (yield from self._seat_held_wire(i, D_final - L, yaw))
+
+    def _route_frame(self, i: int):
+        """Fork i's route frame from the current observation: fork xy, fork yaw, the unit
+        vector from the fixation through the fork and its normal."""
+        obs = self._obs
+        fx, fy, fz, fyaw = obs["forks"][i]
+        f_xy = np.array([fx, fy])
+        p_fix, _ = self._fixation(i)
+        L = float(np.linalg.norm(f_xy - p_fix[:2]))
+        u = (f_xy - p_fix[:2]) / max(L, 1e-6)
+        return f_xy, float(fyaw), u, np.array([-u[1], u[0]])
+
+    def seat_from_here(self, i: int) -> Generator:
+        """Seat the wire the gripper already holds in fork i, from wherever the tool is:
+        lower it beyond the fork, ramp the tension, centre and wiggle it past the lips,
+        release, back off (route_fork's last stages). For handing over from another
+        controller, e.g. a learned policy that carried the wire over the slot. A wire that
+        lies on a prong rather than over the slot is first lifted clear of the prongs with the
+        gripper back on the route line, so it comes down over the slot."""
+        cfg, obs = self.cfg, self._obs
+        bz = self._board_z()
+        f_xy, _, u, _ = self._route_frame(i)
+        d = float((obs["tcp_pos"][:2] - f_xy) @ u)
+        d = float(np.clip(d, self.p.min_beyond, self.p.max_beyond))
+        # turn the gripper as route_fork does, so the held wire leaves it along the route (a
+        # skewed gripper bends the stiff wire sideways at the fork, and centring it there then
+        # takes a lateral offset that crosses the slot at too steep an angle)
+        route_yaw = math.atan2(u[1], u[0])
+        yaw = wrap_angle(route_yaw - self._held_wire_yaw_offset(arclength_near(obs["cable"], obs["tcp_pos"])))
+        if abs(self._q6_after(yaw)) > 5.6:
+            yaw = self._closest_yaw(route_yaw, float(obs["tcp_yaw"][0]))
+        chk = cable_crossing_in_fork(obs["cable"], obs["forks"][i], cfg.fork, bz)
+        if not chk["inside"] and not abs(chk["y"]) < cfg.fork.slot_width / 2:
+            self.phase = "route_realign"
+            z_top = bz + cfg.fork.post_height + cfg.fork.prong_height
+            q = f_xy + d * u
+            self._say(f"fork {i}: wire {chk['y'] * 1000:.1f} mm off the slot, lifting it clear to line up again")
+            yield from self._goto(np.array([q[0], q[1], max(float(obs["tcp_pos"][2]), z_top + 0.03)]), yaw,
+                                  speed=0.05, tol=0.003, timeout=3.0)
+        return (yield from self._seat_held_wire(i, d, yaw))
+
+    def _seat_held_wire(self, i: int, d: float, yaw: float) -> Generator:
+        """Lower the held wire ``d`` beyond fork i, seat it, release it and back off."""
+        cfg, p_cfg = self.cfg, self.p
+        bz = self._board_z()
+        f_xy, fyaw, u, n = self._route_frame(i)
+        z_top = bz + cfg.fork.post_height + cfg.fork.prong_height
+        z_transit = z_top + p_cfg.transit_clearance
+
         # lower the held wire beyond the fork while keeping it taut: take up slack by
         # moving away from the fork, give way when the tension gets high
         self.phase = "route_descend"
         z_press = bz + p_cfg.press_height
-        d = D_final - L
         z_goal = float(self._obs["tcp_pos"][2])
         obs = self._obs
         t_end = self._t + 12.0

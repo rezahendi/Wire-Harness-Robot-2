@@ -15,10 +15,12 @@
 # When it says "round finished", stop the VM in the Nebius console. (Shutting the VM down
 # from inside does not stop it: Nebius restarts it and keeps charging.)
 #
-# Settings (environment variables): BUILDS (400), SEED_START (3000), BASE (an earlier set
-# with the same state layout to add; "" by default), DATASET (train on this packaged set
+# Settings (environment variables): BUILDS (400), SEED_START (3000), BASE (earlier sets with
+# the same state layout to add, space-separated, e.g. "~/data/route_v5
+# ~/eval/route_v5_takeovers/takeovers"; "" by default), DATASET (train on this packaged set
 # instead of recording one, e.g. ~/data/route_v3: steps 1-2 are skipped and its _val set is
-# reused), NOISE (1.0), HOLD (1.0), STEPS (12000),
+# reused), NOISE (1.0), SEAT_RECOVERIES (0: the share of route calls recorded as the expert
+# seating the wire after a deliberately bad descent, try 0.3), HOLD (1.0), STEPS (12000),
 # SAVE_STEPS (3000), EXTRA_TRAIN_ARGS (e.g. "--tune-visual"), WORKERS (vCPUs - 1),
 # EVAL_SEEDS (0-19), EVAL_WORKERS (4), PORT (5556), HORIZONS ("8": action steps executed per
 # chunk, one evaluation each), BASELINE (a checkpoint evaluated on the same boards for
@@ -33,6 +35,7 @@ SEED_START="${SEED_START:-3000}"          # 1000s: first set, 2000s: second; 0-9
 BASE="${BASE:-}"
 DATASET="${DATASET:-}"
 NOISE="${NOISE:-1.0}"
+SEAT_RECOVERIES="${SEAT_RECOVERIES:-0}"
 HOLD="${HOLD:-1.0}"
 STEPS="${STEPS:-12000}"
 SAVE_STEPS="${SAVE_STEPS:-3000}"
@@ -70,7 +73,7 @@ trap 'say "stopped (Ctrl-c); run the same command again to carry on"; exit 130' 
 if [ -n "$DATASET" ]; then
     say "round $NAME: training on $DATASET, $STEPS steps ${EXTRA_TRAIN_ARGS}"
 else
-    say "round $NAME: $BUILDS builds (seeds from $SEED_START, pushes $NOISE, hold $HOLD s), $STEPS steps"
+    say "round $NAME: $BUILDS builds (seeds from $SEED_START, pushes $NOISE, seat recoveries $SEAT_RECOVERIES, hold $HOLD s), $STEPS steps"
 fi
 
 # 1. demos -----------------------------------------------------------------------------
@@ -82,7 +85,7 @@ elif [ -f "$NEW/meta/info.json" ]; then
 else
     say "1/7 recording into $NEW"
     python -m harness_agent.groot_data record --out "$NEW" --seed-start "$SEED_START" --builds "$BUILDS" \
-        --workers "$WORKERS" --noise "$NOISE" --hold-after "$HOLD"
+        --workers "$WORKERS" --noise "$NOISE" --seat-recoveries "$SEAT_RECOVERIES" --hold-after "$HOLD"
 fi
 
 # 2. the training set ------------------------------------------------------------------
@@ -90,8 +93,8 @@ if [ -f "$DATA/meta/info.json" ]; then
     say "2/7 packaging: done before ($DATA)"
 else
     say "2/7 packaging $DATA"
-    sources=("$NEW")
-    if [ -n "$BASE" ]; then sources=("$BASE" "$NEW"); fi
+    read -r -a sources <<< "$BASE"                # earlier sets first, then the new demos
+    sources=("${sources[@]/#\~/$HOME}" "$NEW")
     python -m harness_agent.groot_data merge "${sources[@]}" --out "$DATA"
 fi
 python -m harness_agent.groot_data check "$DATA" | tail -25

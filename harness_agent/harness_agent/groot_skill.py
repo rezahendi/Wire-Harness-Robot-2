@@ -20,6 +20,14 @@ With ``restarts`` > 0, a try that stalls (the gripper let go of the wire outside
 no new milestone for 12 s) is cleared away the way a failed skill is (gripper open, tool up)
 and the policy starts over from there, as often as allowed within the time limit.
 
+With ``seat_assist`` (seconds), the expert's force-controlled seating takes over once the policy
+has held the wire lined up over the slot, low, for that long in all without getting it in, or
+when it starts to open the gripper there: the expert lowers the wire beyond the fork, centres
+it, ramps the tension, wiggles it past the lips, lets go and backs off (``seat_from_here``). A
+hybrid, reported apart from the policy alone. With a ``takeover_sink``, every successful
+takeover is also recorded as a training episode (camera views, states and the expert's
+actions from the policy's own stuck states: DAgger-style data for the next round).
+
 Along the way the runner notes how far the policy got (``self.last["milestones"]``, seconds
 after the start): the wire really in the hand, lifted above the prongs, carried over the fork
 lined up with its slot, inside the slot, released there. The evaluation turns these into a
@@ -28,7 +36,7 @@ funnel.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Generator, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Generator, Iterable, List, Optional, Tuple
 
 import numpy as np
 
@@ -43,6 +51,8 @@ HOLDS_MM = 2.0          # ... and the fingers stopped by the wire (closed on not
 OVER_SLOT_MM = 5.0      # wire in hand, crossing the fork's slot plane this close to the slot (any height)
 LET_GO_S = 2.0          # with restarts: the gripper open this long after holding the wire, the wire not in the slot
 NO_PROGRESS_S = 12.0    # with restarts: no new milestone for this long (a good try takes ~15 s in all)
+ASSIST_LOW_M = 0.015    # seat assist: "low" = the tool less than this above the prong tops (the expert's descent)
+ASSIST_LETGO = 0.7      # seat assist: a gripper command below this opens the fingers past the wire (9 mm)
 
 
 def ensemble_action(active: List[Tuple[int, np.ndarray]], step: int, decay: float) -> np.ndarray:
@@ -57,7 +67,8 @@ class GrootRunner:
     def __init__(self, client, skills: Iterable[str] = ("route_fork",), forks: Optional[Iterable[str]] = None,
                  attempts: Optional[Iterable[int]] = (0,), execute_horizon: int = 8, max_seconds: float = 40.0,
                  name: str = "GR00T N1.7 (fine-tuned)", ensemble_decay: Optional[float] = None,
-                 record_trajectory: bool = False, restarts: int = 0):
+                 record_trajectory: bool = False, restarts: int = 0, seat_assist: Optional[float] = None,
+                 takeover_sink: Optional[Callable[[Any, Dict[str, Any]], None]] = None):
         self.client = client
         self.skills = set(skills)
         self.forks = None if forks is None else set(forks)
@@ -68,6 +79,8 @@ class GrootRunner:
         self.ensemble_decay = None if ensemble_decay is None else float(ensemble_decay)
         self.record_trajectory = bool(record_trajectory)       # per step, in self.last["trajectory"]
         self.restarts = int(restarts)                            # fresh starts after a stalled try
+        self.seat_assist = None if seat_assist is None else float(seat_assist)   # see the module notes
+        self.takeover_sink = takeover_sink        # (EpisodeBuffer, info) per successful takeover, when set
         self._cams: Dict[int, gf.Cameras] = {}
         self.last: Dict[str, Any] = {}
         self._state_keys: Optional[List[str]] = None     # the state keys the served model was trained with
@@ -143,12 +156,55 @@ class GrootRunner:
         z_top = bz + cfg.fork.post_height + cfg.fork.prong_height
         z_clear = z_top + 0.03
         wire_d = 2.0 * cfg.wire.radius
-        inside_since = open_outside_since = None
-        held, seen, progress_t = False, set(), float(obs["time"][0])
+        st: Dict[str, Any] = {"inside_since": None, "held": False, "seen": set(), "progress_t": float(obs["time"][0]),
+                              "ready": False, "ready_s": 0.0, "t_prev": float(obs["time"][0])}
+        traj = self.last.get("trajectory")
+
+        def observe(obs: Dict[str, np.ndarray], sent: np.ndarray) -> Tuple[float, float, Dict[str, Any], bool]:
+            """Bookkeeping after every step, whoever acted: milestones, the trajectory row, how long
+            the wire has been ready to seat. Returns (time, gripper opening, slot check, routed)."""
+            t = float(obs["time"][0])
+            opening = float(obs["gripper"][0])
+            closed = opening < wire_d + 0.003
+            holds = closed and opening > HOLDS_MM / 1000.0
+            if closed:
+                self.last["grasped"] = True
+            chk = cable_crossing_in_fork(obs["cable"], obs["forks"][i], cfg.fork, bz)
+            now = self._milestones(obs, i, holds, z_top, chk, cfg.fork.slot_width, opening > 0.02, t - t0)
+            if set(now) - st["seen"]:
+                st["seen"].update(now)
+                st["progress_t"] = t
+            st["held"] = st["held"] or "in_hand" in now
+            # ready to seat: in the hand, lined up over the slot, low, not in yet
+            st["ready"] = ("over_slot" in now and "inside" not in now
+                           and float(obs["tcp_pos"][2]) < z_top + ASSIST_LOW_M)
+            if st["ready"]:
+                st["ready_s"] += t - st["t_prev"]
+            st["t_prev"] = t
+            if traj is not None:
+                tcp = obs["tcp_pos"]
+                found = bool(np.isfinite(chk["y"]))
+                traj.append([round(t - t0, 3), *(round(float(v), 4) for v in tcp), round(float(obs["tcp_yaw"][0]), 3),
+                             round(opening, 4), *(round(float(v), 2) for v in obs["wrench"][:3]),
+                             round(float(chk["y"]), 4) if found else None,
+                             round(float(chk["z"]), 4) if found else None, int(bool(chk["inside"])),
+                             *(round(float(v), 3) for v in sent)])
+            # routed: the wire in the slot, the gripper open and the tool clear, for half a second
+            if self.last["grasped"] and chk["inside"] and opening > 0.02 and float(obs["tcp_pos"][2]) > z_clear:
+                st["inside_since"] = t if st["inside_since"] is None else st["inside_since"]
+                routed = t - st["inside_since"] >= 0.5
+            else:
+                st["inside_since"] = None
+                routed = False
+            if routed:
+                self.last["seconds"] = round(t - t0, 2)
+            return t, opening, chk, routed
+
+        assisted = False
         queue: list = []
         active: List[Tuple[int, np.ndarray]] = []          # (step it was asked at, chunk) when ensembling
         step = next_ask = 0
-        traj = self.last.get("trajectory")
+        open_outside_since = None
         while True:
             if self.ensemble_decay is None:
                 if not queue:
@@ -163,45 +219,79 @@ class GrootRunner:
                     self.last["calls"] += 1
                 action = ensemble_action(active, step, self.ensemble_decay)
             sent = np.asarray(action, dtype=float)
+            if (self.seat_assist is not None and not assisted and st["ready"]
+                    and (st["ready_s"] >= self.seat_assist - 1e-9 or float(sent[4]) < ASSIST_LETGO)):
+                assisted = True
+                why = "stuck" if st["ready_s"] >= self.seat_assist - 1e-9 else "letting go"
+                if (yield from self._assist(session, i, t0, why, observe)):
+                    return None
+                if watch:
+                    return "seat assist failed"
+                obs = session.obs                                # the policy carries on from here
+                queue, active, next_ask = [], [], step
+                continue
             obs = yield action
             step += 1
-            t = float(obs["time"][0])
-            opening = float(obs["gripper"][0])
-            closed = opening < wire_d + 0.003
-            holds = closed and opening > HOLDS_MM / 1000.0
-            if closed:
-                self.last["grasped"] = True
-            chk = cable_crossing_in_fork(obs["cable"], obs["forks"][i], cfg.fork, bz)
-            now = self._milestones(obs, i, holds, z_top, chk, cfg.fork.slot_width, opening > 0.02, t - t0)
-            if set(now) - seen:
-                seen.update(now)
-                progress_t = t
-            held = held or "in_hand" in now
-            if traj is not None:
-                tcp = obs["tcp_pos"]
-                found = bool(np.isfinite(chk["y"]))
-                traj.append([round(t - t0, 3), *(round(float(v), 4) for v in tcp), round(float(obs["tcp_yaw"][0]), 3),
-                             round(opening, 4), *(round(float(v), 2) for v in obs["wrench"][:3]),
-                             round(float(chk["y"]), 4) if found else None,
-                             round(float(chk["z"]), 4) if found else None, int(bool(chk["inside"])),
-                             *(round(float(v), 3) for v in sent)])
-            if self.last["grasped"] and chk["inside"] and opening > 0.02 and float(obs["tcp_pos"][2]) > z_clear:
-                inside_since = t if inside_since is None else inside_since
-                if t - inside_since >= 0.5:
-                    self.last["seconds"] = round(t - t0, 2)
-                    return None
-            else:
-                inside_since = None
+            t, opening, chk, routed = observe(obs, sent)
+            if routed:
+                return None
             if not watch:
                 continue
-            if held and opening > 0.02 and not chk["inside"]:
+            if st["held"] and opening > 0.02 and not chk["inside"]:
                 open_outside_since = t if open_outside_since is None else open_outside_since
                 if t - open_outside_since >= LET_GO_S:
                     return "let go outside the slot"
             else:
                 open_outside_since = None
-            if t - progress_t >= NO_PROGRESS_S:
+            if t - st["progress_t"] >= NO_PROGRESS_S:
                 return f"no progress for {NO_PROGRESS_S:.0f} s"
+
+    def _assist(self, session, i: int, t0: float, why: str,
+                observe) -> Generator[np.ndarray, Dict[str, np.ndarray], bool]:
+        """The expert seats the wire the policy holds (``seat_from_here``), then holds still until
+        the wire counts as routed (at most a second). True when it does."""
+        ex = session.expert
+        ex._grip = 1.0                                   # keep the fingers closed on the wire
+        info: Dict[str, Any] = {"t": round(float(session.obs["time"][0]) - t0, 2), "why": why}
+        self.last.setdefault("assists", []).append(info)
+        ep = None
+        if self.takeover_sink is not None:
+            from .groot_data import EpisodeBuffer
+            cfg, plan = session.cfg, self._plan
+            ep = EpisodeBuffer("route_fork", session.route[i],
+                               lambda o: gf.join_state(gf.state_parts(o, "route_fork", i, cfg, plan=plan)),
+                               plan_fn=lambda: plan)
+        cams = self.cameras(session) if ep is not None else None
+        routed = False
+        gen = ex.seat_from_here(i)
+        try:
+            ok = False
+            try:
+                action = next(gen)
+                while True:
+                    if ep is not None:
+                        ep.add(session.obs, cams.render(session.env.cell.sim.data), action)
+                    obs = yield action
+                    *_, routed = observe(obs, np.asarray(action, dtype=float))
+                    action = gen.send(obs)
+            except StopIteration as stop:
+                ok = bool(stop.value)
+            # hold still until the wire counts as routed, a second at most; when recording, the whole
+            # second, as the demos end (the policy learns to stop when done)
+            for _ in range(gf.FPS if ok else 0):
+                if routed and ep is None:
+                    break
+                action = ex._hold()
+                if ep is not None:
+                    ep.add(session.obs, cams.render(session.env.cell.sim.data), action)
+                obs = yield action
+                *_, routed = observe(obs, np.asarray(action, dtype=float))
+        finally:
+            gen.close()
+        info.update({"ok": bool(routed), "seconds": round(float(session.obs["time"][0]) - t0 - info["t"], 2)})
+        if routed and ep is not None and len(ep):
+            self.takeover_sink(ep, dict(info))
+        return routed
 
     def _milestones(self, obs, i: int, holds: bool, z_top: float, chk: Dict[str, Any], slot_width: float,
                     opened: bool, t: float) -> List[str]:
@@ -231,12 +321,14 @@ class GrootRunner:
 
 
 def connect_runner(address: Optional[str] = None, attempts: str = "0", timeout_ms: int = 120000,
-                   restarts: int = 0, max_seconds: float = 40.0) -> GrootRunner:
+                   restarts: int = 0, max_seconds: float = 40.0, seat_assist: Optional[float] = None,
+                   ensemble_decay: Optional[float] = None, execute_horizon: int = 8) -> GrootRunner:
     """A runner for the GR00T policy server at HOST:PORT (default 127.0.0.1:5556).
 
     ``attempts`` says which route_fork attempts the policy takes: "0" (the first one; a retry
     after a failure goes to the expert), "0,1", or "all". ``restarts``: fresh starts the
-    policy gets after a stalled try, within ``max_seconds``."""
+    policy gets after a stalled try, within ``max_seconds``. ``seat_assist``: seconds stuck over
+    the slot before the expert's seating takes over (None: never)."""
     from .groot_client import DEFAULT_PORT, GrootClient
     host, port = "127.0.0.1", DEFAULT_PORT
     if address:
@@ -251,7 +343,8 @@ def connect_runner(address: Optional[str] = None, attempts: str = "0", timeout_m
         raise SystemExit(f"no GR00T policy server at {host}:{port} (start gr00t/eval/run_gr00t_server.py "
                          f"with --port {port})")
     chosen = None if attempts == "all" else [int(a) for a in str(attempts).split(",") if a.strip()]
-    return GrootRunner(client, attempts=chosen, restarts=restarts, max_seconds=max_seconds)
+    return GrootRunner(client, attempts=chosen, restarts=restarts, max_seconds=max_seconds, seat_assist=seat_assist,
+                       ensemble_decay=ensemble_decay, execute_horizon=execute_horizon)
 
 
 def route_stats(tool_calls: Optional[List[Dict[str, Any]]]) -> Dict[str, int]:

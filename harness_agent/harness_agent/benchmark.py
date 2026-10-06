@@ -31,6 +31,13 @@ from .vision_eval import parse_seeds
 PLANNERS = ("scripted", "nemotron")
 
 
+def groot_label(runner) -> str:
+    """'+groot' for GR00T runs, '+groot+assist' when the expert's seating may take over."""
+    if runner is None:
+        return ""
+    return "+groot" + ("+assist" if getattr(runner, "seat_assist", None) is not None else "")
+
+
 def run_one(spec_path: str, planner: str, scenario: str, seed: int, out_dir: str, vision: bool = False,
             model: Optional[str] = None, max_turns: int = 40, log=print, runner=None) -> Dict[str, Any]:
     from .agent import NemotronPlanner, ScriptedPlanner
@@ -74,7 +81,7 @@ def run_one(spec_path: str, planner: str, scenario: str, seed: int, out_dir: str
     write_report(os.path.join(out_dir, "report.md"), spec, result, session)
     session.close()
     u = result.get("usage") or {}
-    label = planner + ("+vision" if vision else "") + ("+groot" if runner is not None else "")
+    label = planner + ("+vision" if vision else "") + groot_label(runner)
     row = {"planner": label, "scenario": scenario, "seed": seed,
            "success": bool(result["success"]), "claimed": result.get("claimed_success"),
            "honest": result.get("claimed_success") is not None
@@ -136,6 +143,10 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     ap.add_argument("--groot-attempts", default="0", help="route_fork attempts GR00T takes: 0, 0,1 or all")
     ap.add_argument("--groot-restarts", type=int, default=0,
                     help="within one attempt, GR00T starts over after a stalled try up to N times (60 s limit)")
+    ap.add_argument("--groot-ensemble", type=float, default=None, metavar="DECAY",
+                    help="a chunk every 4 steps, overlapping chunks averaged (try 0.1)")
+    ap.add_argument("--groot-seat-assist", type=float, default=None, metavar="SECONDS",
+                    help="hybrid: the expert's seating takes over a wire GR00T holds stuck over the slot (try 1.5)")
     args = ap.parse_args(list(argv) if argv is not None else None)
 
     from harness_core.render_util import choose_gl_backend
@@ -164,11 +175,13 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     if args.groot is not None and not args.table_only:
         from .groot_skill import connect_runner
         runner = connect_runner(args.groot or None, args.groot_attempts, restarts=args.groot_restarts,
-                                max_seconds=60.0 if args.groot_restarts else 40.0)
+                                max_seconds=60.0 if args.groot_restarts else 40.0,
+                                seat_assist=args.groot_seat_assist, ensemble_decay=args.groot_ensemble,
+                                execute_horizon=4 if args.groot_ensemble is not None else 8)
     for seed in ([] if args.table_only else parse_seeds(args.seeds)):
         for scenario in scenarios:
             for planner in planners:
-                label = planner + ("+vision" if args.vision else "") + ("+groot" if runner is not None else "")
+                label = planner + ("+vision" if args.vision else "") + groot_label(runner)
                 if (label, scenario, seed) in done and not args.force:
                     continue
                 out_dir = os.path.join(args.out, f"{label}_{scenario}_s{seed}")

@@ -20,6 +20,11 @@ stay unseen for evaluation.
 With --noise the executed motion is pushed around while the expert's clean action is
 recorded, so the demos show how to get back on track (DART); --hold-after adds a short,
 recorded stand-still after each successful call, so the policy learns to stop when done.
+With --seat-recoveries a share of the route_fork calls go wrong on purpose where a learned
+policy goes wrong: the expert carries the wire over the fork, then the tool comes down
+somewhere off (beside the slot, too close, too low, turned), unrecorded, and the expert's
+seating from there (seat_from_here: turn back, lift clear and line up when needed, seat) is
+recorded as the episode.
 
 Recording can be stopped and resumed. Finished builds are marked in <out>/staging, so the
 same command run again (after a preempted VM, say) skips them. Ctrl-c stops the recording
@@ -94,9 +99,18 @@ class EpisodeBuffer:
         self.states: List[np.ndarray] = []
         self.actions: List[np.ndarray] = []
         self.raw: Dict[str, List[np.ndarray]] = {k: [] for k in RAW_KEYS + ("plan",)}
+        self.tags: Dict[str, Any] = {}            # extra episode metadata (e.g. kind: seat_recovery)
 
     def __len__(self) -> int:
         return len(self.actions)
+
+    def add(self, obs: Dict[str, np.ndarray], images: Dict[str, np.ndarray], action) -> None:
+        """One frame: the camera images, the state, the perception behind it and the action taken."""
+        for k in gf.VIDEO_KEYS:
+            self.frames[k].append(images[k])
+        self.states.append(self.state_fn(obs))
+        self.keep_raw(obs)
+        self.actions.append(np.clip(np.asarray(action, dtype=np.float32).reshape(5), -1.0, 1.0))
 
     def keep_raw(self, obs: Dict[str, np.ndarray]) -> None:
         """The perception behind this frame's state, so later state layouts can be computed from
@@ -161,14 +175,31 @@ class RecoveryNoise:
         return out
 
 
+# bad descents for seat recoveries: where a learned policy has been seen to put the wire down
+BAD_DESCENT = {"lateral_mm": (3.0, 12.0),     # either side of the route line
+               "closer_mm": (-25.0, 10.0),    # change of the distance past the fork (closer is negative)
+               "height_mm": (30.0, 50.0),     # tool height above the board (the expert seats at 14)
+               "yaw_deg": 15.0}               # gripper turned up to this much off
+
+
+def bad_descent(rng: np.random.Generator) -> Dict[str, float]:
+    lo, hi = BAD_DESCENT["lateral_mm"]
+    return {"lateral": float(rng.choice([-1.0, 1.0]) * rng.uniform(lo, hi)) / 1000.0,
+            "closer": float(rng.uniform(*BAD_DESCENT["closer_mm"])) / 1000.0,
+            "height": float(rng.uniform(*BAD_DESCENT["height_mm"])) / 1000.0,
+            "yaw": math.radians(float(rng.uniform(-BAD_DESCENT["yaw_deg"], BAD_DESCENT["yaw_deg"])))}
+
+
 def make_recording_session(spec, seed: int, randomize: bool, skills: Sequence[str], sink, size: int,
-                           noise: float = 0.0, hold_after: float = 0.0):
+                           noise: float = 0.0, hold_after: float = 0.0, seat_recoveries: float = 0.0):
     """A CellSession whose route_fork / insert_connector calls are recorded as episodes.
 
     ``sink(buffer, result, session)`` receives every finished episode (successful or not).
     ``noise`` > 0 pushes the executed motion while recording (the scale of the pushes);
-    ``hold_after`` > 0 records that many seconds of standing still after a successful call."""
-    from .session import CellSession
+    ``hold_after`` > 0 records that many seconds of standing still after a successful call;
+    ``seat_recoveries``: the share of route_fork calls recorded as a seat recovery from a bad
+    descent instead (``ep.tags["kind"] == "seat_recovery"``)."""
+    from .session import CellSession, _classify_fork_failure
 
     class DemoSession(CellSession):
         def __init__(self, *a, **kw):
@@ -179,32 +210,33 @@ def make_recording_session(spec, seed: int, randomize: bool, skills: Sequence[st
             self._noise = (RecoveryNoise(noise, np.random.default_rng(seed + 104729),
                                          phase=lambda: getattr(self.expert, "phase", ""))
                            if noise > 0 else None)
+            self._bad_rng = np.random.default_rng(seed + 60013)       # which calls, and how they go wrong
+            self._buf: Optional[EpisodeBuffer] = None
 
         def _on_step(self, action: np.ndarray) -> None:
             ep = self._ep
             if ep is None:
                 return
-            obs = self.obs
-            imgs = self._cams.render(self.env.cell.sim.data)
-            for k in gf.VIDEO_KEYS:
-                ep.frames[k].append(imgs[k])
-            ep.states.append(ep.state_fn(obs))
-            ep.keep_raw(obs)
-            ep.actions.append(np.clip(np.asarray(action, dtype=np.float32).reshape(5), -1.0, 1.0))
+            ep.add(self.obs, self._cams.render(self.env.cell.sim.data), action)
 
-        def _record(self, skill: str, target: str, state_fn, run, plan_fn=None):
-            self._ep = EpisodeBuffer(skill, target, state_fn, plan_fn)
-            if self._noise is not None:
+        def _record(self, skill: str, target: str, state_fn, run, plan_fn=None, tags=None, paused=False):
+            """Run a skill call, recording it as an episode. ``paused``: the call starts recording
+            itself (self._ep = self._buf), e.g. at the hand-over of a seat recovery."""
+            ep = self._buf = EpisodeBuffer(skill, target, state_fn, plan_fn)
+            ep.tags = dict(tags or {})
+            self._ep = None if paused else ep
+            if self._noise is not None and not paused:
                 self._noise.reset()
                 self.action_noise = self._noise
             try:
                 res = run()
                 self.action_noise = None
-                if hold_after > 0 and getattr(res, "ok", False) and len(self._ep):
+                if hold_after > 0 and getattr(res, "ok", False) and len(ep):
+                    self._ep = ep
                     self._record_hold(hold_after)
             finally:
                 self.action_noise = None
-                ep, self._ep = self._ep, None
+                self._ep = self._buf = None
             if len(ep):
                 sink(ep, res, self)
             return res
@@ -223,13 +255,67 @@ def make_recording_session(spec, seed: int, randomize: bool, skills: Sequence[st
             if "route_fork" not in skills or i is None or self.env is None:
                 return super().route_fork(fork_id, attempt, pick_offset_mm)
             cfg, expert = self.cfg, self.expert
-            # the expert makes its plan (grasp point, holding distance) before its first action,
-            # which is when the first state is recorded
-            return self._record("route_fork", fork_id,
-                                lambda obs: gf.join_state(gf.state_parts(obs, "route_fork", i, cfg,
-                                                                         plan=expert.route_plan)),
+
+            def state_fn(obs):
+                # the expert makes its plan (grasp point, holding distance) before its first action,
+                # which is when the first state is recorded
+                return gf.join_state(gf.state_parts(obs, "route_fork", i, cfg, plan=expert.route_plan))
+
+            if seat_recoveries > 0 and self._bad_rng.random() < seat_recoveries:
+                bad = bad_descent(self._bad_rng)
+                return self._record("route_fork", fork_id, state_fn,
+                                    lambda: self._route_with_bad_descent(fork_id, i, attempt, pick_offset_mm, bad),
+                                    plan_fn=lambda: expert.route_plan, paused=True,
+                                    tags={"kind": "seat_recovery",
+                                          **{f"bad_{k}": round(v, 4) for k, v in bad.items()}})
+            return self._record("route_fork", fork_id, state_fn,
                                 lambda: super(DemoSession, self).route_fork(fork_id, attempt, pick_offset_mm),
                                 plan_fn=lambda: expert.route_plan)
+
+        def _route_with_bad_descent(self, fork_id: str, i: int, attempt: int, pick_offset_mm, bad):
+            """route_fork, but once the wire is carried over the fork the tool comes down where
+            ``bad`` says (not recorded); the expert's seating from there is (seat_from_here)."""
+            args = {"fork_id": fork_id, "attempt": attempt, "pick_offset_mm": pick_offset_mm}
+            missing = [f for f in self.route[:i] if not self.perceive()["forks"][f]["wire_in_slot"]]
+            if missing:                                      # refused as usual (nothing recorded)
+                return super().route_fork(fork_id, attempt, pick_offset_mm)
+            t_wall = time.perf_counter()
+            ex = self.expert
+            ex.current_fork = i
+            offset = None if pick_offset_mm is None else float(pick_offset_mm) / 1000.0
+
+            def go():
+                gen = ex._route_fork(i, int(attempt), offset)
+                try:
+                    action = next(gen)
+                    while ex.phase != "route_descend":
+                        action = gen.send((yield action))
+                except StopIteration as stop:                # failed before the wire was over the fork
+                    return stop.value
+                gen.close()
+                f_xy, _, u, n = ex._route_frame(i)
+                tcp = ex._obs["tcp_pos"]
+                d = float((tcp[:2] - f_xy) @ u) + bad["closer"]
+                q = f_xy + max(d, 0.02) * u + bad["lateral"] * n
+                goal = np.array([q[0], q[1], ex._board_z() + bad["height"]])
+                yaw = float(ex._obs["tcp_yaw"][0]) + bad["yaw"]
+                ex.phase = "bad_descent"
+                for _ in range(int(4.0 * gf.FPS)):
+                    if np.linalg.norm(ex._obs["target_pos"] - goal) < 0.001:
+                        break
+                    yield ex._action_toward(ex._obs, goal, yaw, speed=0.06)
+                for _ in range(int(0.3 * gf.FPS)):
+                    yield ex._hold()
+                self._ep = self._buf                         # recording starts at the hand-over
+                return (yield from ex.seat_from_here(i))
+
+            run = self._drive(go(), budget=60.0)
+            ok = bool(run["value"]) and run["reason"] == "done"
+            outcome = "routed" if ok else _classify_fork_failure(run)
+            if not ok and run["reason"] == "done":
+                self._ep = None
+                self._drive(self._clear_board(), budget=6.0)
+            return self._result("route_fork", args, ok, outcome, run, time.perf_counter() - t_wall)
 
         def insert_connector(self):
             if "insert_connector" not in skills or self.env is None:
@@ -341,6 +427,9 @@ def record_seed(seed: int) -> Dict[str, Any]:
     def sink(ep: EpisodeBuffer, out, session) -> None:
         nonlocal order
         order += 1
+        if ep.tags.get("kind"):                          # e.g. seat recoveries: [kept, dropped]
+            tally = res.setdefault(ep.tags["kind"], [0, 0])
+            tally[0 if getattr(out, "ok", False) else 1] += 1
         if not getattr(out, "ok", False):
             res["dropped"] += 1
             return
@@ -350,12 +439,14 @@ def record_seed(seed: int) -> Dict[str, Any]:
             "attempt": args.get("attempt", 0), "scenario": scenario_name, "outcome": out.outcome,
             "max_force": round(float(out.max_force), 2),
             "t_start": round(float(out.sim_time_start), 2),
-            **({"noise": noise} if noise else {}), **({"hold_s": hold} if hold else {})})
+            **({"noise": noise} if noise and not ep.tags else {}), **({"hold_s": hold} if hold else {}),
+            **ep.tags})
         res["kept"] += 1
 
     try:
         session = make_recording_session(_REC["spec_obj"], seed, True, skills, sink, _REC["size"],
-                                         noise=noise, hold_after=hold)
+                                         noise=noise, hold_after=hold,
+                                         seat_recoveries=float(_REC.get("seat_recoveries", 0.0)))
         try:
             if session.feasible:
                 scripted_build(session, scenario_name, routing_only=set(skills) <= {"route_fork"})
@@ -379,7 +470,8 @@ def _duration(seconds: float) -> str:
 
 
 def record(seeds: Sequence[int], out: str, workers: int, skills: Sequence[str], popped: float, spec: str,
-           size: int, noise: float = 0.0, hold_after: float = 0.0) -> Dict[str, Any]:
+           size: int, noise: float = 0.0, hold_after: float = 0.0,
+           seat_recoveries: float = 0.0) -> Dict[str, Any]:
     """Record the builds that are not done yet, then package everything staged into ``out``."""
     if os.path.exists(os.path.join(out, "meta", "info.json")):
         raise SystemExit(f"{out} already holds a packaged dataset. Record into a new folder and combine the two:\n"
@@ -392,7 +484,7 @@ def record(seeds: Sequence[int], out: str, workers: int, skills: Sequence[str], 
         print(f"resuming: {len(seeds) - len(todo)} of {len(seeds)} builds were already recorded in {staging}")
     workers = max(1, min(workers, len(todo)))
     job = {"staging": staging, "skills": list(skills), "popped": popped, "spec": spec, "size": size,
-           "noise": noise, "hold_after": hold_after}
+           "noise": noise, "hold_after": hold_after, "seat_recoveries": seat_recoveries}
     print(f"recording {len(todo)} builds on {workers} worker{'s' if workers > 1 else ''} "
           f"(skills: {', '.join(skills)}) -> {out}\nCtrl-c stops and packages the episodes recorded so far.",
           flush=True)
@@ -826,6 +918,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     r.add_argument("--noise", type=float, default=0.0,
                    help="recovery demos: push the executed motion while the expert's clean action is "
                         "recorded; each build gets a random scale up to this (try 1.0)")
+    r.add_argument("--seat-recoveries", type=float, default=0.0, metavar="SHARE",
+                   help="this share of route_fork calls goes wrong on purpose after the carry (the tool comes "
+                        "down off the slot, unrecorded) and records the expert seating the wire from there "
+                        "(try 0.3)")
     r.add_argument("--hold-after", type=float, default=0.0,
                    help="record this many seconds of standing still after each successful call (try 1.0)")
     c = sub.add_parser("check", help="validate a recorded set and print a summary")
@@ -871,7 +967,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     seeds = _parse_seeds(args.seeds) if args.seeds else list(range(args.seed_start, args.seed_start + args.builds))
     skills = [s.strip() for s in args.skills.split(",") if s.strip()]
     res = record(seeds, args.out, args.workers, skills, args.popped, _spec_path(args.spec), args.size,
-                 noise=args.noise, hold_after=args.hold_after)
+                 noise=args.noise, hold_after=args.hold_after, seat_recoveries=args.seat_recoveries)
     print(f"{res['episodes']} episodes ({res['frames']} frames) in {args.out}, {res['dropped']} failed skill calls "
           f"dropped, {res['seconds']} s; tasks: {res['tasks']}")
     if res["errors"]:
