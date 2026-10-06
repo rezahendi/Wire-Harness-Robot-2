@@ -18,6 +18,8 @@
 #             getting it in (or starts to let go there), the expert's force-controlled seating
 #             takes over (a hybrid; the summary counts what the policy did alone)
 #   assist_best  assist and restarts together, with videos
+#   system    the full system: assist, and when the policy's call fails the board is cleared and
+#             the expert retries, as the planner does in a build
 #   takeovers ens4 + assist on training boards (TAKEOVER_SEEDS, 8000-8199), and where the policy
 #             stalls before the slot (no grasp, not lifted, not carried over, dropped) the expert
 #             redoes the route; every successful takeover saved as a training episode
@@ -148,16 +150,18 @@ for v in $VARIANTS; do
                       --seat-assist "$ASSIST" --trajectories ;;
         assist_best) serve "$CKPT"; evaluate "$out" "$EVAL_SEEDS" --execute-horizon 4 --ensemble 0.1 \
                       --seat-assist "$ASSIST" --restarts 2 --max-seconds 60 --trajectories --video ;;
+        system)   serve "$CKPT"; evaluate "$out" "$EVAL_SEEDS" --execute-horizon 4 --ensemble 0.1 \
+                      --seat-assist "$ASSIST" --fallback --trajectories ;;
         takeovers) serve "$CKPT"; evaluate "$out" "$TAKEOVER_SEEDS" --execute-horizon 4 --ensemble 0.1 \
                       --seat-assist "$ASSIST" --route-assist --max-seconds 60 --record-takeovers ;;
-        *)        echo "unknown variant $v (ens4, restarts, steps8, best, assist, assist_best, takeovers)"; exit 1 ;;
+        *)        echo "unknown variant $v (ens4, restarts, steps8, best, assist, assist_best, system, takeovers)"; exit 1 ;;
     esac
 done
 stop_server
 
 say "results"
 for f in "$HOME/eval/$NAME/summary.md" "$HOME/eval/${NAME}"_*/summary.md; do
-    if [ -f "$f" ]; then echo "== $f"; sed -n '3,8p' "$f"; grep -E "^(Restarts|Seat assist)|takeover episodes" "$f" || true; fi
+    if [ -f "$f" ]; then echo "== $f"; sed -n '3,8p' "$f"; grep -E "^(Restarts|Seat assist|Route takeovers|Routed without|Full system)|takeover episodes" "$f" || true; fi
 done
 say "evaluations finished. Results: ~/eval/${NAME}_*   Log: $LOG"
 if [ -z "${QUIET_END:-}" ]; then

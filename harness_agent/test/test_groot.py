@@ -515,6 +515,40 @@ def test_the_expert_seats_a_wire_handed_over_off_the_slot():
         s.close()
 
 
+def test_the_full_system_retries_a_failed_groot_call_with_the_expert():
+    """--fallback: a GR00T call that fails (here one that never moves, with a 1 s limit) is followed
+    by the expert's retry on the cleared board, and the row and summary report the system."""
+    from harness_agent.groot_eval import run_trial, summarize
+    from harness_agent.spec import HarnessSpec
+
+    class StuckRunner:
+        name, max_seconds, restarts, seat_assist, route_assist = "GR00T (stuck)", 1.0, 0, None, False
+
+        def __init__(self):
+            self.last = {}
+            self.client = type("Client", (), {"calls": 0, "seconds": 0.0})()
+
+        def wants(self, skill, target="", attempt=0):
+            return True
+
+        def route_fork(self, session, i):
+            self.last = {"fork": session.route[i], "calls": 0, "grasped": False, "furthest": None, "milestones": {}}
+            while True:
+                yield session.expert._hold()
+
+        def close(self):
+            pass
+
+    spec_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "specs")
+    row = run_trial(HarnessSpec.from_yaml(os.path.join(spec_dir, "demo_3fork.yaml")), 1003, "F1", StuckRunner(),
+                    fallback=True)
+    assert not row["ok"] and row["outcome"] == "timeout"
+    assert row["fallback"]["ok"] and row["system_ok"] and row["system_truth_routed"]
+    text = summarize([row], "t")
+    assert "| all | 1 | 0/1 (0%)" in text and "Full system" in text and "1/1 wires routed" in text
+    assert "the expert's retry 1 of the 1 it got" in text
+
+
 def test_takeovers_are_written_as_episodes_merge_keeps_apart(tmp_path):
     from harness_agent.groot_data import EpisodeBuffer, episodes_in, merge
     from harness_agent.groot_eval import summarize, takeover_writer

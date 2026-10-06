@@ -204,6 +204,10 @@ Two options change how the same checkpoint is run, without retraining:
   plans afresh, picks, carries and seats. The thresholds sit above the slowest successful
   trial of `route_v5` at each stage. Use `--max-seconds 60` so the expert has time. Replayed
   on the 16 trials of `route_v5` that stalled before the slot, it routed 14.
+- `--fallback`, the full system: when the policy's call fails, the board is cleared and the
+  expert retries on it, as the planner does in a build (forks the failed try pulled the wire
+  out of are routed again first). The summary adds the system's success rate and who routed
+  what; the success table stays the policy's own.
 - `--record-takeovers` (with `--seat-assist` or `--route-assist`): every successful takeover is also saved as a
   training episode in `<out>/takeovers` (camera views, states and the expert's actions,
   starting from the policy's own stuck state, ending with a second's stand-still). That is
@@ -356,7 +360,8 @@ retraining (~30 min per variant on 20 boards, `~/eval/<name>_<variant>`): `ens4`
 every 4 steps, ensembled, with trajectories), `restarts` (up to 2 fresh starts after a stalled
 try, 60 s), `best` (both, with videos), `steps8` (8 denoising steps instead of 4: a copy of
 `config.json` next to links to the weights), `assist` (ens4 with the seat assist after 1.5 s:
-the hybrid), `assist_best` (assist with restarts and videos) and `takeovers` (ens4 + assist +
+the hybrid), `assist_best` (assist with restarts and videos), `system` (assist, and the
+expert's retry after a failed call: the full system) and `takeovers` (ens4 + assist +
 route takeovers on 200 training boards, `TAKEOVER_SEEDS=8000-8199`, 60 s per trial, recording
 every takeover as a training episode for the next round).
 

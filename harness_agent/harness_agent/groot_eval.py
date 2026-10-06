@@ -49,7 +49,10 @@ def wilson(k: int, n: int, z: float = 1.96) -> tuple:
 
 
 def run_trial(spec, seed: int, fork: str, runner, video_dir: Optional[str] = None,
-              replay_episode: Optional[int] = None) -> Dict[str, Any]:
+              replay_episode: Optional[int] = None, fallback: bool = False) -> Dict[str, Any]:
+    """One trial: the expert sets up the forks before ``fork``, then ``runner`` (GR00T; None: the
+    expert) routes it. With ``fallback``, a failed GR00T call is followed by the expert's retry on
+    the cleared board, as the planner does in a build (the full system)."""
     from .session import CellSession
 
     session = CellSession(spec, seed=seed, randomize=True, render=video_dir is not None, frame_every=0.1)
@@ -86,6 +89,20 @@ def run_trial(spec, seed: int, fork: str, runner, video_dir: Optional[str] = Non
                 out.update({"tries": runner.last.get("tries", 1), "stalls": list(runner.last.get("stalls") or [])})
             if runner.seat_assist is not None or runner.route_assist:
                 out["assists"] = list(runner.last.get("assists") or [])
+        if fallback and runner is not None:
+            fb = None
+            if not res.ok:                               # the board was cleared after the failed call
+                session.skill_runners.pop("route_fork", None)
+                fb = session.route_fork(fork, attempt=1)
+                if fb.outcome == "previous_fork_not_seated":  # the try pulled the wire out of an earlier fork
+                    for before in route[:k]:
+                        if not session.perceive()["forks"][before]["wire_in_slot"]:
+                            session.route_fork(before, attempt=1)
+                    fb = session.route_fork(fork, attempt=1)
+                out["fallback"] = {"ok": bool(fb.ok), "outcome": fb.outcome,
+                                   "seconds": round(float(fb.sim_time_end - fb.sim_time_start), 1)}
+            out["system_ok"] = bool(res.ok) or bool(fb is not None and fb.ok)
+            out["system_truth_routed"] = bool(session.truth()["forks_routed"].get(fork))
         if video_dir is not None and session.frames:
             import imageio
             os.makedirs(video_dir, exist_ok=True)
@@ -160,7 +177,8 @@ def _trial(task: Tuple[int, str, Optional[int]]) -> Dict[str, Any]:
     try:
         if opts.get("takeover_dir") and _WORKER["runner"] is not None:
             _WORKER["runner"].takeover_sink = takeover_writer(opts["takeover_dir"], seed, fork)
-        row = run_trial(_WORKER["spec"], seed, fork, _WORKER["runner"], opts["video_dir"], replay_episode=episode)
+        row = run_trial(_WORKER["spec"], seed, fork, _WORKER["runner"], opts["video_dir"], replay_episode=episode,
+                        fallback=bool(opts.get("fallback")))
         runner = _WORKER["runner"]
         if opts.get("traj_dir") and runner is not None and runner.last.get("trajectory") and "ok" in row:
             os.makedirs(opts["traj_dir"], exist_ok=True)
@@ -227,6 +245,15 @@ def summarize(rows: List[Dict[str, Any]], title: str) -> str:
                           + f"); it {did} {done} of them."]
         alone = sum(r["ok"] for r in rows if "ok" in r and not r.get("assists"))
         lines += [f"Routed without the expert's help: {alone}/{sum(1 for r in rows if 'ok' in r)}."]
+    if any("system_ok" in r for r in rows):
+        rs = [r for r in rows if "system_ok" in r]
+        retried = [r for r in rs if "fallback" in r]
+        n_ok = sum(r["system_ok"] for r in rs)
+        lo, hi = wilson(n_ok, len(rs))
+        lines += ["", f"Full system (GR00T first, the expert's retry on the cleared board when it fails): "
+                      f"{n_ok}/{len(rs)} wires routed ({100 * n_ok / len(rs):.0f}%, 95% interval "
+                      f"{100 * lo:.0f}-{100 * hi:.0f}%); GR00T's call routed {sum(r['ok'] for r in rs)}, the expert's "
+                      f"retry {sum(r['fallback']['ok'] for r in retried)} of the {len(retried)} it got."]
     fails: Dict[str, int] = {}
     for r in rows:
         if "ok" in r and not r["ok"]:
@@ -300,6 +327,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help="when the policy stalls before the wire is over the slot (no grasp 9 s in, not lifted, "
                          "not carried over, dropped), the expert redoes the whole route from there (for "
                          "collecting data with --record-takeovers; try --max-seconds 60)")
+    ap.add_argument("--fallback", action="store_true",
+                    help="the full system: after a failed GR00T call the board is cleared and the expert retries "
+                         "(as the planner does in a build); the summary adds the system's success rate")
     ap.add_argument("--record-takeovers", action="store_true",
                     help="with --seat-assist or --route-assist: save every successful takeover as a training "
                          "episode in <out>/takeovers (use training seeds, e.g. 30000-30199)")
@@ -361,6 +391,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             "timeout_ms": int(1000 * args.timeout), "forks": forks, "execute_horizon": args.execute_horizon,
             "max_seconds": args.max_seconds, "ensemble": args.ensemble, "trajectories": args.trajectories,
             "restarts": args.restarts, "seat_assist": args.seat_assist, "route_assist": args.route_assist,
+            "fallback": args.fallback,
             "takeover_dir": os.path.join(args.out, "takeovers") if args.record_takeovers else None,
             "traj_dir": os.path.join(args.out, "trajectories") if args.trajectories else None,
             "video_dir": os.path.join(args.out, "videos") if args.video else None,
@@ -370,7 +401,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         else f" ({args.execute_horizon} steps per chunk)") + (
         f", up to {args.restarts} restarts in {args.max_seconds:g} s" if args.restarts else "") + (
         f", seat assist after {args.seat_assist:g} s" if args.seat_assist is not None else "") + (
-        ", route takeovers" if args.route_assist else "")
+        ", route takeovers" if args.route_assist else "") + (
+        ", the expert retrying a failed call" if args.fallback else "")
     print(f"{len(tasks)} trials with {who} on {workers} worker{'s' if workers > 1 else ''} -> {args.out}", flush=True)
 
     rows: List[Dict[str, Any]] = list(kept)
