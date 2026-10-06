@@ -195,9 +195,16 @@ Two options change how the same checkpoint is run, without retraining:
   gripper there, the expert's force-controlled seating takes over (`seat_from_here`: turn the
   gripper so the wire leaves it along the route, lift a wire that lies on a prong clear and
   line it up again, lower it beyond the fork, centre it, ramp the tension, wiggle it past the
-  lips, let go, back off). The summary says how many trials were handed over and how many the
-  policy routed alone; report the two apart.
-- `--record-takeovers` (with `--seat-assist`): every successful takeover is also saved as a
+  lips, let go, back off). It also takes a wire that has hung over the slot for 6 s without
+  coming down. The summary says how many trials were handed over and how many the policy
+  routed alone; report the two apart.
+- `--route-assist`, for collecting data: where the policy stalls before the slot (no wire in
+  the hand 9 s into the try, not lifted 3.5 s after grasping, not over the slot 6 s after
+  lifting, or the wire dropped), the expert redoes the whole route from there: it lets go,
+  plans afresh, picks, carries and seats. The thresholds sit above the slowest successful
+  trial of `route_v5` at each stage. Use `--max-seconds 60` so the expert has time. Replayed
+  on the 16 trials of `route_v5` that stalled before the slot, it routed 14.
+- `--record-takeovers` (with `--seat-assist` or `--route-assist`): every successful takeover is also saved as a
   training episode in `<out>/takeovers` (camera views, states and the expert's actions,
   starting from the policy's own stuck state, ending with a second's stand-still). That is
   DAgger-style data: the demos the policy is missing are the ones from the states it gets
@@ -257,6 +264,8 @@ On 40 test boards (seeds 0-39, 119 trials):
 | `route_v3` | 41/119 (34%) | 8 | 92 / 68 / 59 / 44 / 41 |
 | `route_v5` (1,261 demos, state v4, 12,000 steps) | 53/119 (45%) | 10 | 101 / 100 / 95 / 63 / 54 |
 | `route_v5`, chunk every 4 steps, ensembled | **69/119 (58%)**: F1 20/40, F2 26/40, F3 23/39 | 2 | 111 / 108 / 103 / 71 / 70 |
+| `route_v5`, ensembled + seat assist (hybrid) | **90/119 (76%)**; the expert seated 41 of the 44 wires handed over | | 110 / 108 / 102 / 92 / 91 |
+| `route_v5`, ensembled + seat assist + up to 2 restarts in 60 s | **94/119 (79%)** | | 118 / 111 / 108 / 95 / 94 |
 
 Trial by trial, `route_v5` routed 32 wires `route_v3` did not and missed 20 it did; the
 ensembled run beat the plain one 34 to 18. The plan keys fixed the grasp (wire in hand in 111
@@ -271,12 +280,21 @@ recorded actions on the same board reproduces its trial to 0.1-0.5 mm; replayed 
 the seat assist would take over (1.5 s stuck, or the gripper starting to open) and handed to
 the expert, the assist takes over in 27 of the 50 failed trials and the expert seats 26 of
 those wires: the hybrid would route about 95 of 119 (80%) where the policy alone routes 69 (to
-be confirmed in closed loop: `--seat-assist 1.5`). What the expert needed from a policy's
+be confirmed in closed loop: it routed 90, above). What the expert needed from a policy's
 stuck state, beyond its own seating: turning the gripper back to the route (the policy holds
 it ~10 degrees off, the stiff wire leaves the fingers skewed, and centring it at the fork then
 takes a 12 mm sideways offset that crosses a fork turned 25 degrees too steeply to pass the
-lips), and lifting a wire that lies on a prong clear before lining up again. The one it cannot finish: a wire grasped so far
-from the fork that it stays slack at the longest holding distance (it would need a new grasp).
+lips), and lifting a wire that lies on a prong clear before lining up again. The one it
+cannot finish: a wire grasped so far from the fork that it stays slack at the longest holding
+distance (it would need a new grasp).
+
+In closed loop the assist takes over more often than the replays predicted (44 of 119 trials,
+the policy alone routing 49 of the other 75): a policy seat that takes longer than 1.5 s low
+over the slot is handed over even where the policy might have finished it. What the hybrid
+still misses comes mostly before the seat: 9 trials never held the wire and 8 dropped it or
+never carried it over the fork. Restarts fix most of the grasps (wire in hand in 118 of 119)
+but a second try rarely finishes in time. The takeovers on 200 training boards (600 trials)
+gave 228 episodes for `route_v6`.
 
 Copy results home from WSL:
 
@@ -338,9 +356,9 @@ retraining (~30 min per variant on 20 boards, `~/eval/<name>_<variant>`): `ens4`
 every 4 steps, ensembled, with trajectories), `restarts` (up to 2 fresh starts after a stalled
 try, 60 s), `best` (both, with videos), `steps8` (8 denoising steps instead of 4: a copy of
 `config.json` next to links to the weights), `assist` (ens4 with the seat assist after 1.5 s:
-the hybrid), `assist_best` (assist with restarts and videos) and `takeovers` (ens4 + assist on
-200 training boards, `TAKEOVER_SEEDS=8000-8199`, recording every takeover as a training
-episode for the next round).
+the hybrid), `assist_best` (assist with restarts and videos) and `takeovers` (ens4 + assist +
+route takeovers on 200 training boards, `TAKEOVER_SEEDS=8000-8199`, 60 s per trial, recording
+every takeover as a training episode for the next round).
 
 ```bash
 tmux new -s evals

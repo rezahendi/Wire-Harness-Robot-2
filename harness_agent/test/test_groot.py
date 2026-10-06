@@ -325,12 +325,24 @@ def _stuck_on_the_prongs(t, y=0.004):
 
 
 class _SeatingExpert:
-    """Stands in for the expert's seat_from_here: after ``steps`` steps the wire is in the slot,
-    the gripper open and the tool up."""
+    """Stands in for the expert's seat_from_here and _route_fork: after ``steps`` steps the wire
+    is in the slot, the gripper open and the tool up."""
 
     def __init__(self, session, steps=20, works=True):
         self.session, self.steps, self.works = session, steps, works
         self.p, self._grip, self.calls = None, -1.0, []
+        self.route_plan = None
+
+    def _route_fork(self, i):
+        self.route_plan = {"s_pick": 0.31, "beyond": 0.075, "press_z": 0.014}     # plans first, as the expert
+        self.calls.append(("route", i))
+        for k in range(self.steps):
+            yield np.array([0.1, 0.0, 0.0, 0.0, -1.0])
+            if k == 2:
+                self.session.holding = True                    # picks the wire up
+            if k == self.steps // 2 and self.works:
+                self.session.inside = True
+        return self.works
 
     def _hold(self):
         return np.array([0.0, 0.0, 0.0, 0.0, self._grip])
@@ -338,7 +350,7 @@ class _SeatingExpert:
     def seat_from_here(self, i):
         self.calls.append((i, self._grip))
         for k in range(self.steps):
-            obs = yield np.array([0.0, 0.1, -0.1, 0.0, self._grip])
+            yield np.array([0.0, 0.1, -0.1, 0.0, self._grip])
             if k == self.steps // 2 and self.works:
                 self.session.inside = True
         self._grip = -1.0
@@ -403,6 +415,61 @@ def test_the_seat_assist_takes_over_a_wire_stuck_on_the_prongs(monkeypatch):
     assert done is None and len(runner.last["assists"]) == 1 and not runner.last["assists"][0]["ok"]
     runner, session, done = run(20.0, assist=1.5, works=False, restarts=1)   # ... or, with restarts, starts over
     assert runner.last["stalls"][0]["why"] == "seat assist failed"
+
+
+def test_route_takeovers_and_a_hovering_wire(monkeypatch):
+    """With route_assist the expert redoes the route when the policy stalls before the slot; a wire
+    hanging over the slot without coming down goes to the seat assist."""
+    from harness_agent.groot_skill import ROUTE_NO_GRASP_S, GrootRunner
+
+    def hovering(t, y=0.004):          # held and lined up over F1, the tool 10 cm up: never "low"
+        return dict(_stuck_on_the_prongs(t, y), cable=np.linspace([0.3, y, 0.04], [0.62, y, 0.105], 33),
+                    tcp_pos=np.array([0.58, y, 0.10]))
+
+    def empty_handed(t):               # the gripper open above the board, nowhere near the wire
+        return dict(_stuck_on_the_prongs(t), gripper=np.array([0.05]), tcp_pos=np.array([0.40, 0.10, 0.12]))
+
+    def run(obs_at, seconds=20.0, **kw):
+        session = type("S", (), {"cfg": _Cfg, "route": ["F1"], "inside": False})()
+        session.obs = obs_at(0.0)
+        session.expert = _SeatingExpert(session)
+        session.env = type("Env", (), {"cell": type("Cell", (), {"sim": type("Sim", (), {"data": None})})})
+        episodes = []
+        runner = GrootRunner(client=None, takeover_sink=lambda ep, info: episodes.append((ep, info)), **kw)
+        monkeypatch.setattr(runner, "_chunk", lambda *a: np.tile([0.0, 0.0, 0.0, 0.0, 1.0], (16, 1)))
+        monkeypatch.setattr(runner, "cameras", lambda s: type("Cams", (), {"render": lambda self, d: {
+            k: np.zeros((8, 8, 3), np.uint8) for k in gf.VIDEO_KEYS}})())
+        gen = runner.route_fork(session, 0)
+        next(gen)
+        done = None
+        for k in range(int(round(seconds / 0.05))):
+            obs = obs_at((k + 1) * 0.05)
+            if getattr(session, "holding", False):
+                obs["gripper"] = np.array([0.006])
+            if session.inside:
+                obs.update(cable=np.linspace([0.3, 0.0, 0.03], [0.62, 0.0, 0.03], 33), gripper=np.array([0.05]),
+                           tcp_pos=np.array([0.58, 0.0, 0.15]))
+            session.obs = obs
+            try:
+                gen.send(obs)
+            except StopIteration as stop:
+                done = stop.value
+                break
+        gen.close()
+        return runner, session, done, episodes
+
+    runner, session, done, eps = run(empty_handed, route_assist=True)
+    a = runner.last["assists"]
+    assert done is True and a[0]["kind"] == "route" and a[0]["why"] == "no grasp" and a[0]["ok"]
+    assert abs(a[0]["t"] - ROUTE_NO_GRASP_S) < 0.11 and session.expert.calls == [("route", 0)]
+    ep, info = eps[0]
+    assert info["kind"] == "route" and len(ep) == 20 + gf.FPS
+    assert np.allclose(ep.raw["plan"][0], [0.31, 0.075, 0.014])    # the states use the expert's new plan
+    runner, session, done, eps = run(empty_handed, seat_assist=1.5)  # route takeovers are off by default
+    assert done is None and "assists" not in runner.last
+    runner, session, done, eps = run(hovering, seat_assist=1.5)
+    a = runner.last["assists"]
+    assert done is True and (a[0]["kind"], a[0]["why"]) == ("seat", "hovering") and abs(a[0]["t"] - 6.0) < 0.11
 
 
 def test_the_expert_seats_a_wire_handed_over_off_the_slot():
@@ -473,7 +540,11 @@ def test_takeovers_are_written_as_episodes_merge_keeps_apart(tmp_path):
              "truth_routed": False, "assists": [{"t": 13.0, "why": "letting go", "ok": False}]}]
     text = summarize(rows, "t")
     assert "2 trials handed the wire to the expert's seating" in text and "it seated 1 of them" in text
-    assert "Routed without the expert's help: 1/3" in text
+    assert "Routed without the expert's help: 1/3" in text and "Route takeovers" not in text
+    rows[0]["assists"] = [{"t": 9.0, "why": "no grasp", "ok": True, "kind": "route"}]
+    text = summarize(rows, "t")
+    assert "Route takeovers (collecting data): 1 trials handed the wire to the expert to redo the route " \
+           "(no grasp 1); it routed 1 of them." in text and "Routed without the expert's help: 0/3" in text
 
 
 def test_bad_descents_stay_in_their_ranges():

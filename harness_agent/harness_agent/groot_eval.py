@@ -15,10 +15,11 @@ request at a time, so with several workers the round trip per action chunk inclu
 in line; the simulator, not the GPU, is usually the bottleneck.
 
 --seat-assist hands a held wire that is stuck on the prongs to the expert's force-controlled
-seating (a hybrid, reported as such). With --record-takeovers every successful takeover is
-also saved as a training episode in <out>/takeovers (DAgger-style: the expert's actions from
-the policy's own stuck states); run it on training seeds (e.g. 8000-8299), not on 0-99, and
-add the folder to the next set with ``groot_data merge``.
+seating (a hybrid, reported as such); --route-assist lets the expert redo the whole route
+when the policy stalls before that (for collecting data). With --record-takeovers every
+successful takeover is also saved as a training episode in <out>/takeovers (DAgger-style:
+the expert's actions from the policy's own failure states); run it on training seeds (e.g.
+30000-30199), not on 0-99, and add the folder to the next set with ``groot_data merge``.
 """
 
 from __future__ import annotations
@@ -83,7 +84,7 @@ def run_trial(spec, seed: int, fork: str, runner, video_dir: Optional[str] = Non
                         "fork_distance_mm": runner.last.get("fork_distance_mm")})
             if runner.restarts:
                 out.update({"tries": runner.last.get("tries", 1), "stalls": list(runner.last.get("stalls") or [])})
-            if runner.seat_assist is not None:
+            if runner.seat_assist is not None or runner.route_assist:
                 out["assists"] = list(runner.last.get("assists") or [])
         if video_dir is not None and session.frames:
             import imageio
@@ -125,7 +126,8 @@ def _init_worker(opts: Dict[str, Any]) -> None:
                                         ensemble_decay=opts.get("ensemble"),
                                         record_trajectory=bool(opts.get("trajectories")),
                                         restarts=int(opts.get("restarts") or 0),
-                                        seat_assist=opts.get("seat_assist"))
+                                        seat_assist=opts.get("seat_assist"),
+                                        route_assist=bool(opts.get("route_assist")))
 
 
 def _close_worker() -> None:
@@ -146,7 +148,8 @@ def takeover_writer(folder: str, seed: int, fork: str):
         count["n"] += 1
         write_episode(ep, os.path.join(folder, "staging", f"t{seed:06d}_{fork}_{count['n']:02d}"), {
             "seed": seed, "order": 100 + count["n"], "skill": ep.skill, "target": ep.target, "attempt": 0,
-            "scenario": "takeover", "outcome": "routed", "takeover_t": info.get("t"), "takeover_why": info.get("why")})
+            "scenario": "takeover", "outcome": "routed", "takeover_t": info.get("t"), "takeover_why": info.get("why"),
+            "takeover_kind": info.get("kind", "seat")})
     return sink
 
 
@@ -207,17 +210,23 @@ def summarize(rows: List[Dict[str, Any]], title: str) -> str:
                       + (", ".join(f"{k} {v}" for k, v in sorted(why.items(), key=lambda x: -x[1])) or "none")
                       + f"); {sum(r['ok'] for r in tried)} of them routed the wire on a later try."]
     if any("assists" in r for r in rows):
-        handed = [r for r in rows if r.get("assists")]
-        why: Dict[str, int] = {}
-        for r in handed:
-            for a in r["assists"]:
-                why[a["why"]] = why.get(a["why"], 0) + 1
-        seated = sum(1 for r in handed if any(a.get("ok") for a in r["assists"]))
-        lines += ["", f"Seat assist (a hybrid): {len(handed)} trials handed the wire to the expert's seating ("
-                      + (", ".join(f"{k} {v}" for k, v in sorted(why.items(), key=lambda x: -x[1])) or "none")
-                      + f"); it seated {seated} of them. Routed without the expert's help: "
-                      + f"{sum(r['ok'] for r in rows if 'ok' in r and not r.get('assists'))}/"
-                      + f"{sum(1 for r in rows if 'ok' in r)}."]
+        for kind, label, did in (("seat", "Seat assist (a hybrid)", "seated"),
+                                 ("route", "Route takeovers (collecting data)", "routed")):
+            handed = [r for r in rows if any(a.get("kind", "seat") == kind for a in r.get("assists") or [])]
+            if kind == "route" and not handed:
+                continue
+            why: Dict[str, int] = {}
+            for r in handed:
+                for a in r["assists"]:
+                    if a.get("kind", "seat") == kind:
+                        why[a["why"]] = why.get(a["why"], 0) + 1
+            done = sum(1 for r in handed if any(a.get("ok") and a.get("kind", "seat") == kind for a in r["assists"]))
+            whom = "the expert's seating" if kind == "seat" else "the expert to redo the route"
+            lines += ["", f"{label}: {len(handed)} trials handed the wire to {whom} ("
+                          + (", ".join(f"{k} {v}" for k, v in sorted(why.items(), key=lambda x: -x[1])) or "none")
+                          + f"); it {did} {done} of them."]
+        alone = sum(r["ok"] for r in rows if "ok" in r and not r.get("assists"))
+        lines += [f"Routed without the expert's help: {alone}/{sum(1 for r in rows if 'ok' in r)}."]
     fails: Dict[str, int] = {}
     for r in rows:
         if "ok" in r and not r["ok"]:
@@ -287,9 +296,13 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help="hybrid: when the policy has held the wire lined up over the slot this long without getting "
                          "it in, or starts to let go there, the expert's force-controlled seating finishes the job "
                          "(try 1.5)")
+    ap.add_argument("--route-assist", action="store_true",
+                    help="when the policy stalls before the wire is over the slot (no grasp 9 s in, not lifted, "
+                         "not carried over, dropped), the expert redoes the whole route from there (for "
+                         "collecting data with --record-takeovers; try --max-seconds 60)")
     ap.add_argument("--record-takeovers", action="store_true",
-                    help="with --seat-assist: save every successful takeover as a training episode in "
-                         "<out>/takeovers (use training seeds, e.g. 8000-8299)")
+                    help="with --seat-assist or --route-assist: save every successful takeover as a training "
+                         "episode in <out>/takeovers (use training seeds, e.g. 30000-30199)")
     ap.add_argument("--timeout", type=float, default=120.0, help="seconds to wait for one answer from the server")
     ap.add_argument("--expert", action="store_true", help="run the expert on the same trials (baseline)")
     ap.add_argument("--trajectories", action="store_true",
@@ -304,8 +317,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     forks = [f.strip() for f in args.forks.split(",") if f.strip()]
     seeds = _parse_seeds(args.seeds)
-    if args.record_takeovers and args.seat_assist is None:
-        raise SystemExit("--record-takeovers needs --seat-assist SECONDS")
+    if args.record_takeovers and args.seat_assist is None and not args.route_assist:
+        raise SystemExit("--record-takeovers needs --seat-assist SECONDS or --route-assist")
     if args.record_takeovers and any(s < 100 for s in seeds):
         print("warning: seeds 0-99 are the test boards; episodes recorded on them must not go into training")
     os.makedirs(args.out, exist_ok=True)
@@ -347,7 +360,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     opts = {"spec": _spec_path(args.spec), "expert": args.expert, "host": args.host, "port": args.port,
             "timeout_ms": int(1000 * args.timeout), "forks": forks, "execute_horizon": args.execute_horizon,
             "max_seconds": args.max_seconds, "ensemble": args.ensemble, "trajectories": args.trajectories,
-            "restarts": args.restarts, "seat_assist": args.seat_assist,
+            "restarts": args.restarts, "seat_assist": args.seat_assist, "route_assist": args.route_assist,
             "takeover_dir": os.path.join(args.out, "takeovers") if args.record_takeovers else None,
             "traj_dir": os.path.join(args.out, "trajectories") if args.trajectories else None,
             "video_dir": os.path.join(args.out, "videos") if args.video else None,
@@ -356,7 +369,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         f" (chunk every {args.execute_horizon} steps, ensembled, decay {args.ensemble:g})" if args.ensemble is not None
         else f" ({args.execute_horizon} steps per chunk)") + (
         f", up to {args.restarts} restarts in {args.max_seconds:g} s" if args.restarts else "") + (
-        f", seat assist after {args.seat_assist:g} s" if args.seat_assist is not None else "")
+        f", seat assist after {args.seat_assist:g} s" if args.seat_assist is not None else "") + (
+        ", route takeovers" if args.route_assist else "")
     print(f"{len(tasks)} trials with {who} on {workers} worker{'s' if workers > 1 else ''} -> {args.out}", flush=True)
 
     rows: List[Dict[str, Any]] = list(kept)
