@@ -255,7 +255,7 @@ On 40 test boards (seeds 0-39, 119 trials):
 | model | routed | protective stops | in hand / lifted / over the slot / inside / released |
 |---|---|---|---|
 | `route_v3` | 41/119 (34%) | 8 | 92 / 68 / 59 / 44 / 41 |
-| `route_v5` (1,288 demos, state v4, 12,000 steps) | 53/119 (45%) | 10 | 101 / 100 / 95 / 63 / 54 |
+| `route_v5` (1,261 demos, state v4, 12,000 steps) | 53/119 (45%) | 10 | 101 / 100 / 95 / 63 / 54 |
 | `route_v5`, chunk every 4 steps, ensembled | **69/119 (58%)**: F1 20/40, F2 26/40, F3 23/39 | 2 | 111 / 108 / 103 / 71 / 70 |
 
 Trial by trial, `route_v5` routed 32 wires `route_v3` did not and missed 20 it did; the
