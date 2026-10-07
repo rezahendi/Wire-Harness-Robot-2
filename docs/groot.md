@@ -270,6 +270,9 @@ On 40 test boards (seeds 0-39, 119 trials):
 | `route_v5`, chunk every 4 steps, ensembled | **69/119 (58%)**: F1 20/40, F2 26/40, F3 23/39 | 2 | 111 / 108 / 103 / 71 / 70 |
 | `route_v5`, ensembled + seat assist (hybrid) | **90/119 (76%)**; the expert seated 41 of the 44 wires handed over | | 110 / 108 / 102 / 92 / 91 |
 | `route_v5`, ensembled + seat assist + up to 2 restarts in 60 s | **94/119 (79%)** | | 118 / 111 / 108 / 95 / 94 |
+| `route_v6` (+ 228 takeovers, 1,250 new demos with seat recoveries, 20,000 steps), ensembled + seat assist | **100/119 (84%)**; the expert seated 54 of 60 | | 116 / 115 / 114 / 101 / 100 |
+| `route_v6`, ensembled + seat assist (with the hover takeover) | **102/119 (86%)**, 78-91%; the expert seated 55 of 56 | | 114 / 114 / 112 / 102 / 102 |
+| the full system: the same, and the expert's retry after a failed call | **115/119 (97%)**, 92-99%; GR00T's call 102, the expert's retry 13 of 17 | | |
 
 Trial by trial, `route_v5` routed 32 wires `route_v3` did not and missed 20 it did; the
 ensembled run beat the plain one 34 to 18. The plan keys fixed the grasp (wire in hand in 111
