@@ -1,0 +1,33 @@
+{
+  "updated": "2026-10-07",
+  "setup": "40 randomized boards never used for training (layout, wire stiffness, friction, slack and wire shape all vary), 3 forks each: 119 routing trials.",
+  "headline": [
+    {"key": "system", "label": "Full system", "k": 115, "n": 119,
+     "detail": "GR00T first; force-controlled seating when it gets stuck at the snap-in; the expert retries an attempt that fails."},
+    {"key": "hybrid", "label": "GR00T + force-controlled seating", "k": 102, "n": 119,
+     "detail": "GR00T N1.7 reaches, grasps and carries the wire over the clip; a force-controlled routine finishes the snap-in when GR00T gets stuck."},
+    {"key": "assist", "label": "Stuck snap-ins finished by force control", "k": 55, "n": 56,
+     "detail": "Of the wires GR00T brought over the clip but could not snap in, the seating routine got 55 in."}
+  ],
+  "rounds": [
+    {"label": "Round 5", "sub": "GR00T + seating", "k": 90, "n": 119},
+    {"label": "Round 6", "sub": "+ DAgger data", "k": 100, "n": 119},
+    {"label": "Round 6", "sub": "+ hover trigger", "k": 102, "n": 119},
+    {"label": "Full system", "sub": "+ expert retry", "k": 115, "n": 119}
+  ],
+  "funnel": {
+    "label": "GR00T + seating, 119 trials",
+    "n": 119,
+    "steps": [["Wire in the hand", 114], ["Lifted", 114], ["Over the clip", 112], ["Inside the clip", 102],
+              ["Released, tool clear", 102]]
+  },
+  "training": [
+    ["Policy", "NVIDIA Isaac GR00T N1.7, a 3-billion-parameter vision-language-action model"],
+    ["Inputs", "Two camera views (scene and wrist), the robot's 79-number state, and the instruction, e.g. \"route the wire into fork F2\""],
+    ["Outputs", "The next 16 motions of the tool and gripper, 20 per second"],
+    ["Data", "About 2,700 episodes: force-guided expert demonstrations with recovery pushes, 228 DAgger takeovers from GR00T's own stuck states, and seat recoveries"],
+    ["Training", "Fine-tuned on Nebius AI Cloud, 1x NVIDIA L40S, 20,000 steps at batch 32 (about 4.5 hours per round)"],
+    ["Planner", "NVIDIA Nemotron on Nebius Token Factory decides every step and checks the result"]
+  ],
+  "next": "Further training (more DAgger rounds, a dedicated snap-in skill) can raise how much of the work GR00T does on its own."
+}

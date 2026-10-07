@@ -9,6 +9,13 @@ and answers get_action with the next 16 recorded actions, advancing by the execu
 horizon, like GR00T's ReplayPolicy. Replaying the expert's own actions on the same seed
 must route the wire: if it does, the observation builder, the client, the chunk execution
 and the success check all work, before any GPU time is spent.
+
+With ``--by-instruction`` it plays the episode recorded for the fork it is asked about,
+restarting whenever the instruction changes, so a whole build can run against it, e.g. the
+web app's GR00T mode on the board the episodes were recorded on (``--seed``):
+
+    python -m harness_agent.groot_data record --out data/board3 --seeds 3 --popped 0
+    python -m harness_agent.groot_replay_server data/board3 --by-instruction --seed 3
 """
 
 from __future__ import annotations
@@ -26,7 +33,8 @@ from .groot_client import DEFAULT_PORT, pack, unpack
 
 
 class ReplayPolicy:
-    def __init__(self, dataset: str, action_horizon: int = 16, execution_horizon: int = 8):
+    def __init__(self, dataset: str, action_horizon: int = 16, execution_horizon: int = 8,
+                 by_instruction: bool = False, seed: Optional[int] = None):
         import pyarrow.parquet as pq
         self._pq = pq
         self.dataset = dataset
@@ -36,8 +44,16 @@ class ReplayPolicy:
             self.episodes = [json.loads(line) for line in f]
         with open(os.path.join(dataset, "meta", "modality.json")) as f:
             modality = json.load(f)
+        seeds_path = os.path.join(dataset, "meta", "harness_episodes.jsonl")
+        self.seeds: Dict[int, int] = {}
+        if os.path.exists(seeds_path):
+            with open(seeds_path) as f:
+                for line in f:
+                    e = json.loads(line)
+                    self.seeds[int(e["episode_index"])] = int(e["seed"])
         self.state_layout = [(k, v["end"] - v["start"]) for k, v in modality["state"].items()]
         self.action_horizon, self.execution_horizon = action_horizon, execution_horizon
+        self.by_instruction, self.seed = bool(by_instruction), seed
         self.episode_index, self.step = 0, 0
         self.observations = 0
         self._load(0)
@@ -47,6 +63,15 @@ class ReplayPolicy:
             episode_chunk=i // self.info["chunks_size"], episode_index=i))
         self.actions = np.asarray(self._pq.read_table(path).to_pydict()["action"], dtype=np.float32)
         self.episode_index = i
+        self.task = (self.episodes[i].get("tasks") or [""])[0] if i < len(self.episodes) else ""
+
+    def episode_for(self, instruction: str) -> Optional[int]:
+        """The first episode recorded for this instruction (on ``seed`` when given)."""
+        for e in self.episodes:
+            i = int(e["episode_index"])
+            if instruction in (e.get("tasks") or []) and (self.seed is None or self.seeds.get(i) == self.seed):
+                return i
+        return None
 
     def reset(self, options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         options = options or {}
@@ -84,6 +109,12 @@ class ReplayPolicy:
     def get_action(self, observation: Dict[str, Any], options: Optional[Dict[str, Any]] = None):
         self.check_observation(observation)
         self.observations += 1
+        text = observation["language"][gf.LANGUAGE_KEY][0][0]
+        if self.by_instruction and text != self.task:          # a new skill call: its own episode, from the start
+            i = self.episode_for(text)
+            if i is not None:
+                self._load(i)
+                self.step = 0
         a, h, n = self.actions, self.action_horizon, len(self.actions)
         if self.step >= n:
             chunk = np.tile(a[-1:], (h, 1))
@@ -136,9 +167,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("dataset")
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
     ap.add_argument("--execution-horizon", type=int, default=8)
+    ap.add_argument("--by-instruction", action="store_true",
+                    help="play the episode recorded for the instruction, from its start when it changes")
+    ap.add_argument("--seed", type=int, help="with --by-instruction: only episodes recorded on this board")
     args = ap.parse_args(argv)
-    policy = ReplayPolicy(args.dataset, execution_horizon=args.execution_horizon)
-    print(f"replaying {len(policy.episodes)} episodes from {args.dataset} on port {args.port}", flush=True)
+    policy = ReplayPolicy(args.dataset, execution_horizon=args.execution_horizon, by_instruction=args.by_instruction,
+                          seed=args.seed)
+    print(f"replaying {len(policy.episodes)} episodes from {args.dataset} on port {args.port}"
+          + (" (by instruction)" if args.by_instruction else ""), flush=True)
     serve(policy, port=args.port)
     return 0
 

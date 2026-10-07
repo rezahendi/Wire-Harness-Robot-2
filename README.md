@@ -17,6 +17,11 @@ wrist force/torque sensor and a parallel gripper routes a deformable wire throug
 * a **build agent**: NVIDIA Nemotron on Nebius Token Factory reads a harness spec, decides
   every step, checks each result and recovers from failures, driving the robot's
   force-controlled skills as tools (section 5),
+* **NVIDIA Isaac GR00T N1.7**, a vision-language-action model, fine-tuned to route the wire
+  from camera images, with force-controlled seating for the snap-in (section 5),
+* **Mission Control**, a web app to start builds and watch them live in 3D: who is moving the
+  robot (GR00T, force-controlled seating, the expert), every decision of the planner, the
+  forces ([`docs/webapp.md`](docs/webapp.md)),
 * a **physics benchmark suite** that measures the simulated wire against beam theory, with an
   Isaac Sim port for comparison (section 8).
 

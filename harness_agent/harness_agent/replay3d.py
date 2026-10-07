@@ -63,6 +63,10 @@ PHASES = {
     "connector_release": "Open, back off, and check the connector is seated.",
     "retreat": "Move the arm out of the camera's view.",
     "disturbance": "Nothing: the robot holds still while the disturbance happens.",
+    "learned_policy": "GR00T N1.7 drives the arm: from the two camera images, the robot's state and the "
+                      "instruction it outputs the next motions, 20 times a second.",
+    "route_realign": "Seating assist: the wire lies on a prong, so lift it clear and line the gripper up "
+                     "with the route again.",
 }
 
 
@@ -269,22 +273,31 @@ def record(trace_path: str, spec_path: Optional[str] = None, opening_status: boo
                                        for d in box.disturbances[n_dist:]]})
     session.call_index = len(calls)
     session._hold(1.0)                                   # a second of stillness at the end
-    r = session.rec
+    doc = scene_document(session, calls, box.disturbances, {
+        "spec": spec.name, "revision": spec.revision, "planner": trace.get("planner"),
+        "model": trace.get("model"), "seed": sess.get("seed"), "scenario": trace.get("scenario"),
+        "success": trace.get("success"), "claimed_success": trace.get("claimed_success"),
+        "replay_matched": bool(matched), "record_wall_s": round(time.perf_counter() - t_wall, 1)})
+    session.close()
+    return doc
+
+
+def scene_document(session: "RecordingSession", calls: List[Dict[str, Any]], tool_disturbances: List[Dict[str, Any]],
+                   meta: Dict[str, Any]) -> Dict[str, Any]:
+    """The viewer's file from a recorded session: what was recorded frame by frame, the tool
+    calls (name, arguments, t_start, t_end, result, reasoning), the disturbances and ``meta``."""
+    r = dict(session.rec)
     phases = sorted(session._phase_ids, key=session._phase_ids.get)
-    disturb = [{"label": d["label"], "t": d["sim_time"]} for d in box.disturbances]
+    disturb = [{"label": d["label"], "t": d["sim_time"]} for d in tool_disturbances]
     disturb += [{"label": e["label"], "t": round(float(e["sim_time"]), 2)} for e in session.events
                 if e.get("type") == "disturbance" and "after" not in e]
     poses = np.stack(r.pop("poses"))                     # (N, M, 7)
     doc = {
-        "meta": {"spec": spec.name, "revision": spec.revision, "planner": trace.get("planner"),
-                 "model": trace.get("model"), "seed": sess.get("seed"), "scenario": trace.get("scenario"),
-                 "success": trace.get("success"), "claimed_success": trace.get("claimed_success"),
-                 "replay_matched": bool(matched), "replay_truth": session.truth(),
-                 "robot_time_s": round(session.sim_time, 2), "record_hz": 1.0 / session.cfg.sim.policy_dt,
+        "meta": {**meta, "replay_truth": session.truth(), "robot_time_s": round(session.sim_time, 2),
+                 "record_hz": 1.0 / session.cfg.sim.policy_dt,
                  "controller": {k: getattr(session.cfg.controller, k) for k in
                                 ("kp_lin", "kf_lin", "kp_rot", "kf_rot", "max_lin_vel", "force_deadband",
-                                 "wrench_filter_hz", "protective_stop_force")},
-                 "record_wall_s": round(time.perf_counter() - t_wall, 1)},
+                                 "wrench_filter_hz", "protective_stop_force")}},
         "calls": calls, "disturbances": sorted(disturb, key=lambda x: x["t"]),
         "phases": phases, "phase_text": {p: PHASES.get(p, p.replace("_", " ")) for p in phases},
         "messages": [[round(float(t), 2), m] for t, m in session.expert.log],
@@ -294,7 +307,6 @@ def record(trace_path: str, spec_path: Optional[str] = None, opening_status: boo
         **r,
     }
     doc["mode"] = [1 if m == "disturbance" else 0 for m in doc["mode"]]
-    session.close()
     return doc
 
 

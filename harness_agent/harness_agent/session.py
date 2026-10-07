@@ -102,6 +102,9 @@ class CellSession:
         self.frame_times: List[float] = []   # sim time of each frame (for the annotated video)
         self.events: List[Dict[str, Any]] = []
         self.on_event = on_event
+        # live observers (the web app): every emitted event plus notices that are not stored,
+        # such as tool calls starting and the planner's reasoning
+        self.on_live: Optional[Callable[[Dict[str, Any]], None]] = None
         self.finished = False
         self.env = None
         self.expert = None
@@ -148,6 +151,12 @@ class CellSession:
         self.events.append(event)
         if self.on_event is not None:
             self.on_event(event)
+        self.notify(event)
+
+    def notify(self, event: Dict[str, Any]) -> None:
+        """Tell live observers about something without storing it in the trace."""
+        if self.on_live is not None:
+            self.on_live(event)
 
     def _fork_index(self, fork_id: str) -> Optional[int]:
         return self.route.index(fork_id) if fork_id in self.route else None
@@ -361,10 +370,16 @@ class CellSession:
                                       + ("" if runner.last.get("grasped") else ", never closed on the wire")
                                       + (f", got as far as: {furthest.replace('_', ' ')}" if furthest else
                                          ", never held the wire"))
+            controller = runner.name
+            for a in runner.last.get("assists") or []:     # the expert's seating finished what the policy started
+                run["messages"].insert(1, f"force-controlled seating took over after {a.get('t', 0):.1f} s "
+                                          f"({a.get('why', '')}): {'seated it' if a.get('ok') else 'did not seat it'}")
+                if a.get("kind", "seat") == "seat":
+                    controller = f"{runner.name} + seating assist"
             if not ok:
                 self._drive(self._clear_board(), budget=6.0)
             return self._result("route_fork", args, ok, outcome, run, time.perf_counter() - t_wall,
-                                controller=runner.name)
+                                controller=controller)
         offset = None if pick_offset_mm is None else float(pick_offset_mm) / 1000.0
         run = self._drive(self.expert._route_fork(i, int(attempt), offset), budget=60.0)
         ok = bool(run["value"]) and run["reason"] == "done"

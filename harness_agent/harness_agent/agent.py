@@ -304,6 +304,10 @@ class NemotronPlanner:
             transcript.append({"turn": turns, "role": "assistant", "content": msg.get("content", ""),
                                "reasoning": (msg.get("reasoning") or "")[:2000],
                                "tool_calls": msg.get("tool_calls", [])})
+            self.session.notify({"type": "plan", "turn": turns, "model": self.model,
+                                 "content": msg.get("content") or "", "reasoning": (msg.get("reasoning") or "")[:4000],
+                                 "tool_calls": [{"name": c["name"], "arguments": c.get("arguments")}
+                                                for c in msg.get("tool_calls") or []]})
             if not msg.get("tool_calls"):
                 nudges += 1
                 if nudges > 3:

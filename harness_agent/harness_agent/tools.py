@@ -101,6 +101,9 @@ class ToolBox:
         }
 
     def call(self, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        index = len(self.calls)
+        self.session.notify({"type": "call_start", "index": index, "name": name,
+                             "arguments": dict(arguments or {}), "sim_time": round(self.session.sim_time, 2)})
         handler = self._handlers.get(name)
         if handler is None:
             out = {"error": f"unknown tool {name!r}", "available": sorted(self._handlers)}
@@ -116,6 +119,8 @@ class ToolBox:
             self._fire_triggers(name, arguments or {}, out)
         self.calls.append({"name": name, "arguments": arguments, "result": out,
                            "sim_time": round(self.session.sim_time, 2)})
+        self.session.notify({"type": "call_end", "index": index, "name": name, "result": out,
+                             "sim_time": round(self.session.sim_time, 2)})
         return out
 
     def _fire_triggers(self, name: str, arguments: Dict[str, Any], out: Dict[str, Any]) -> None:

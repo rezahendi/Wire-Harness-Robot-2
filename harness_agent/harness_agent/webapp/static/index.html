@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Harness Cell Mission Control</title>
+<meta name="description" content="Plan, run and watch wire-harness builds: Nemotron plans, GR00T N1.7 routes the wire, force control seats it.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Barlow:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body data-view="build">
+<header class="top">
+  <div class="brand">
+    <span class="logo" aria-hidden="true"></span>
+    <div>
+      <div class="eyebrow">Wire-harness robot cell</div>
+      <h1>Mission Control</h1>
+    </div>
+  </div>
+  <nav class="tabs" role="tablist" aria-label="Views">
+    <button type="button" role="tab" id="tab-build" aria-selected="true" aria-controls="view-build">Build</button>
+    <button type="button" role="tab" id="tab-results" aria-selected="false" aria-controls="view-results">Results</button>
+  </nav>
+  <div class="status" id="status" aria-live="polite"></div>
+  <button type="button" class="icon-btn" id="theme" title="Light or dark" aria-label="Switch between light and dark">◐</button>
+</header>
+
+<main id="view-build" class="layout" role="tabpanel" aria-labelledby="tab-build">
+  <aside class="col left" aria-label="Harness and new build">
+    <section class="card" aria-labelledby="h-harness">
+      <div class="card-head">
+        <h2 id="h-harness">Harness</h2>
+        <label class="upload">Upload a spec<input type="file" id="spec-file" accept=".yaml,.yml" hidden></label>
+      </div>
+      <select id="spec-select" aria-label="Harness"></select>
+      <figure class="drawing" id="drawing"><a id="drawing-link" target="_blank" rel="noopener" title="Open the drawing full size"><img id="spec-drawing" alt="Assembly drawing of the selected harness"></a></figure>
+      <div class="route" id="spec-route" aria-label="Route of the wire"></div>
+      <div class="checks" id="spec-checks"></div>
+    </section>
+
+    <section class="card form" aria-labelledby="h-options">
+      <h2 id="h-options">New build</h2>
+      <div class="field">
+        <span class="flabel" id="l-planner">Planner</span>
+        <div class="seg" id="opt-planner" role="group" aria-labelledby="l-planner">
+          <button type="button" data-v="nemotron">Nemotron</button>
+          <button type="button" data-v="scripted">Scripted</button>
+        </div>
+      </div>
+      <div class="field">
+        <span class="flabel" id="l-groot">Routing</span>
+        <div class="seg" id="opt-groot" role="group" aria-labelledby="l-groot">
+          <button type="button" data-v="1">GR00T</button>
+          <button type="button" data-v="0">Expert</button>
+        </div>
+        <p class="hint" id="groot-hint"></p>
+      </div>
+      <div class="field">
+        <label class="flabel" for="opt-scenario">Disturbance</label>
+        <select id="opt-scenario">
+          <option value="nominal">None</option>
+          <option value="popped_wire" title="Pulled out of the second fork after it was routed">Wire pulled out</option>
+          <option value="slip_on_insert" title="The connector slips out of the fingers during the insertion">Connector slips</option>
+          <option value="both">Both</option>
+        </select>
+      </div>
+      <div class="field">
+        <span class="flabel" id="l-vision">Camera</span>
+        <div class="seg" id="opt-vision" role="group" aria-labelledby="l-vision">
+          <button type="button" data-v="0">Off</button>
+          <button type="button" data-v="1">Vision check</button>
+        </div>
+      </div>
+      <div class="field">
+        <label class="flabel" for="opt-seed">Board</label>
+        <div class="board-row">
+          <input type="number" id="opt-seed" min="0" max="99999" value="3">
+          <button type="button" class="icon-btn" id="seed-dice" title="Another random board" aria-label="Another random board">⚄</button>
+          <label class="check" title="Randomize the layout, the wire's stiffness and friction"><input type="checkbox" id="opt-random" checked> varied</label>
+        </div>
+      </div>
+      <div class="field">
+        <span class="flabel" id="l-pace">Pace</span>
+        <div class="seg" id="opt-pace" role="group" aria-labelledby="l-pace">
+          <button type="button" data-v="1">Real time</button>
+          <button type="button" data-v="0" title="As fast as the simulator runs">Fast</button>
+        </div>
+      </div>
+      <button type="button" class="btn primary" id="start">Start build</button>
+      <p class="hint" id="start-hint"></p>
+    </section>
+
+    <section class="card" aria-labelledby="h-past">
+      <h2 id="h-past">Builds</h2>
+      <ol class="past" id="past"></ol>
+    </section>
+  </aside>
+
+  <section class="col center" aria-label="The cell">
+    <div class="stage" id="stage">
+      <canvas id="canvas" tabindex="0" aria-label="3D view of the cell: drag to turn, scroll to zoom"></canvas>
+      <div id="tags"></div>
+      <div class="banner" id="banner" hidden></div>
+      <div class="toolbar">
+        <div class="seg" role="group" aria-label="Camera">
+          <button type="button" id="cam-cell" aria-pressed="true">Cell</button>
+          <button type="button" id="cam-follow" aria-pressed="false">Follow the tool</button>
+        </div>
+      </div>
+      <div class="empty" id="empty">
+        <div>
+          <h3>Pick a harness and start a build</h3>
+          <p>Nemotron plans every step, GR00T N1.7 routes the wire from camera images, and force control
+            seats it. Watch it here live, or open a past build on the left to replay it.</p>
+        </div>
+      </div>
+      <div class="three-legend" aria-label="Who is moving the robot">
+        <span><i style="background:var(--planner)"></i>Nemotron: the next step</span>
+        <span><i style="background:var(--groot)"></i>GR00T N1.7 drives</span>
+        <span><i style="background:var(--assist)"></i>Force-controlled seating</span>
+        <span><i style="background:var(--expert)"></i>Force-guided expert skill</span>
+        <span><i style="background:var(--warn)"></i>Disturbance</span>
+      </div>
+    </div>
+    <div class="nowbar" id="nowbar">
+      <span class="actor" id="actor"><i></i>Idle</span>
+      <span class="nowtext" id="nowtext">No build open.</span>
+      <span class="clock" id="clock"></span>
+    </div>
+    <div class="transport" id="transport" hidden>
+      <button type="button" class="btn" id="play" title="Play or pause (space)">Play</button>
+      <div class="seg" id="speeds" role="group" aria-label="Playback speed">
+        <button type="button" data-v="1">1×</button>
+        <button type="button" data-v="2">2×</button>
+        <button type="button" data-v="4">4×</button>
+      </div>
+      <div class="scrub" id="scrub">
+        <div class="scrub-track" id="scrub-track"></div>
+        <div class="scrub-calls" id="scrub-calls"></div>
+        <div class="scrub-head" id="scrub-head"></div>
+        <input type="range" id="scrub-range" min="0" max="1000" value="0" step="1" aria-label="Robot time">
+      </div>
+    </div>
+    <section class="result" id="result-card" aria-label="Result of the build" hidden></section>
+  </section>
+
+  <aside class="col right" aria-label="Decisions and the robot">
+    <section class="card decisions-card" aria-labelledby="h-decisions">
+      <div class="card-head">
+        <h2 id="h-decisions">Planner decisions</h2>
+        <span class="sub" id="planner-name"></span>
+      </div>
+      <ol class="decisions" id="decisions"><li class="empty-note">The planner's decisions appear here.</li></ol>
+    </section>
+    <section class="card robot-card" aria-labelledby="h-robot">
+      <div class="card-head">
+        <h2 id="h-robot">Robot</h2>
+        <span class="sub">force-limited admittance control, 500 Hz</span>
+      </div>
+      <div class="phase" id="phase-text">–</div>
+      <div class="stats">
+        <div class="stat"><div class="k">Force</div><div class="v" id="st-force">0.0<small>N</small></div></div>
+        <div class="stat"><div class="k">Gripper</div><div class="v" id="st-grip">0<small>mm</small></div></div>
+        <div class="stat"><div class="k">Tool speed</div><div class="v" id="st-speed">0<small>mm/s</small></div></div>
+      </div>
+      <canvas class="spark" id="spark" aria-label="Force on the tool over the last 12 seconds"></canvas>
+      <div class="spark-key"><span>force on the tool, last 12 s</span><span>scale 0 to 30 N</span></div>
+      <div class="truth" id="truth" aria-label="What the simulator says is done"></div>
+      <div class="log" id="log" aria-live="off">–</div>
+    </section>
+  </aside>
+</main>
+
+<main id="view-results" class="results" role="tabpanel" aria-labelledby="tab-results" hidden>
+  <div id="results-body"><p class="empty-note">Loading the results…</p></div>
+</main>
+
+<script src="/static/vendor/three.min.js"></script>
+<script src="/static/vendor/OrbitControls.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

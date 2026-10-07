@@ -7,7 +7,8 @@ package_name = 'harness_agent'
 setup(
     name=package_name,
     version='0.1.0',
-    packages=[package_name],
+    packages=[package_name, package_name + '.webapp'],
+    package_data={package_name + '.webapp': ['results.json', 'static/*.*', 'static/vendor/*']},
     data_files=[
         ('share/ament_index/resource_index/packages', ['resource/harness_agent']),
         ('share/harness_agent', ['package.xml']),
@@ -16,7 +17,7 @@ setup(
     ],
     install_requires=['setuptools'],
     extras_require={'test': ['pytest']},
-    zip_safe=True,
+    zip_safe=False,                 # the web app serves its page from the package folder
     maintainer='Reza',
     maintainer_email='rezahendi590@gmail.com',
     description='Nemotron build agent, harness specs and tool interface for the wire-harness cell.',
@@ -32,6 +33,7 @@ setup(
             'groot_data = harness_agent.groot_data:main',
             'groot_eval = harness_agent.groot_eval:main',
             'groot_replay_server = harness_agent.groot_replay_server:main',
+            'mission_control = harness_agent.webapp.server:main',
         ],
     },
 )

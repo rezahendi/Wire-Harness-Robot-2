@@ -701,6 +701,25 @@ def test_several_clients_share_one_policy_server(tmp_path):
     assert not errors and got == [(1, 16, 4)] * 15 and policy.observations == 15
 
 
+def test_replay_server_can_play_the_episode_for_each_instruction(tmp_path):
+    from harness_agent.groot_replay_server import ReplayPolicy
+    data = str(_tiny_dataset(tmp_path))                     # F1 recorded on board 1000, F2 on board 1001
+    imgs = {k: np.zeros((256, 256, 3), np.uint8) for k in gf.VIDEO_KEYS}
+
+    def ask(policy, text):
+        return policy.get_action(gf.observation_for_policy(imgs, np.zeros(gf.STATE_DIM, np.float32), text))[1]
+
+    policy = ReplayPolicy(data, execution_horizon=8, by_instruction=True)
+    assert ask(policy, "route the wire into fork F2") == {"episode_index": 1, "current_step": 0}
+    assert ask(policy, "route the wire into fork F2") == {"episode_index": 1, "current_step": 8}
+    assert ask(policy, "route the wire into fork F1") == {"episode_index": 0, "current_step": 0}   # a new call
+    assert ask(policy, "route the wire into fork F9") == {"episode_index": 0, "current_step": 8}   # none: plays on
+    on_board = ReplayPolicy(data, execution_horizon=8, by_instruction=True, seed=1000)
+    assert ask(on_board, "route the wire into fork F2")["episode_index"] == 0     # F2 was not recorded on 1000
+    plain = ReplayPolicy(data, execution_horizon=8)                                # the default: one episode
+    assert ask(plain, "route the wire into fork F2") == {"episode_index": 0, "current_step": 0}
+
+
 def test_recovery_pushes_follow_the_experts_phase():
     from harness_agent.groot_data import RecoveryNoise
     phase = {"now": "pick_close"}
