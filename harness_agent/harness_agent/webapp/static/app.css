@@ -278,6 +278,7 @@ select, input[type="number"] { background: var(--panel-2); border: 1px solid var
 .tile.system .big { color: var(--ok); }
 .tile.hybrid .big { color: var(--groot); }
 .tile.assist .big { color: var(--assist); }
+.tile.planner .big { color: var(--planner); }
 .tile .lbl { font-weight: 600; font-size: 16px; }
 .tile .frac { font-family: var(--f-mono); font-size: 12.5px; color: var(--muted); }
 .tile p { margin: 0; font-size: 13.5px; color: var(--ink-2); }

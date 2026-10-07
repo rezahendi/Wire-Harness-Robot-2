@@ -2,12 +2,12 @@
   "updated": "2026-10-07",
   "setup": "40 randomized boards never used for training (layout, wire stiffness, friction, slack and wire shape all vary), 3 forks each: 119 routing trials.",
   "headline": [
-    {"key": "system", "label": "Full system", "k": 115, "n": 119,
+    {"key": "system", "label": "Full system", "k": 115, "n": 119, "unit": "wires routed",
      "detail": "GR00T first; force-controlled seating when it gets stuck at the snap-in; the expert retries an attempt that fails."},
-    {"key": "hybrid", "label": "GR00T + force-controlled seating", "k": 102, "n": 119,
+    {"key": "hybrid", "label": "GR00T + force-controlled seating", "k": 102, "n": 119, "unit": "wires routed",
      "detail": "GR00T N1.7 reaches, grasps and carries the wire over the clip; a force-controlled routine finishes the snap-in when GR00T gets stuck."},
-    {"key": "assist", "label": "Stuck snap-ins finished by force control", "k": 55, "n": 56,
-     "detail": "Of the wires GR00T brought over the clip but could not snap in, the seating routine got 55 in."}
+    {"key": "planner", "label": "Builds Nemotron completed", "k": 40, "n": 40, "unit": "builds",
+     "detail": "Ten randomised boards built four ways: undisturbed, a wire pulled out of a fork, a connector slipping out of the fingers, both. Nemotron noticed every disturbance, re-planned and finished all 40, and its verdict always matched the simulator (expert routing; hand-written rules: 37)."}
   ],
   "rounds": [
     {"label": "Round 5", "sub": "GR00T + seating", "k": 90, "n": 119},

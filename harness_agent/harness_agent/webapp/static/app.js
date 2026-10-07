@@ -1086,7 +1086,7 @@ function renderResults(R) {
   body.dataset.done = '1';
   const pct = (k, n) => Math.round(100 * k / n);
   const tiles = R.headline.map((h) => `<article class="tile ${esc(h.key)}"><div class="big">${pct(h.k, h.n)}%</div>
-    <div class="lbl">${esc(h.label)}</div><div class="frac">${h.k} of ${h.n}${h.key !== 'assist' ? ' wires routed' : ''}</div><p>${esc(h.detail)}</p></article>`).join('');
+    <div class="lbl">${esc(h.label)}</div><div class="frac">${h.k} of ${h.n} ${esc(h.unit || '')}</div><p>${esc(h.detail)}</p></article>`).join('');
   body.innerHTML = `
     <header><div class="eyebrow">Results · updated ${esc(R.updated)}</div>
       <h2>Nemotron plans, GR00T N1.7 routes the wire, force control seats it</h2>

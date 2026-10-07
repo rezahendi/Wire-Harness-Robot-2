@@ -32,7 +32,7 @@ def test_status_specs_and_results(client):
     assert specs["demo_3fork.yaml"]["feasible"] and specs["demo_3fork.yaml"]["route"] == ["F1", "F2", "F3"]
     assert not specs["demo_infeasible.yaml"]["feasible"]
     res = client.get("/api/results").json()
-    assert [h["key"] for h in res["headline"]] == ["system", "hybrid", "assist"]
+    assert [h["key"] for h in res["headline"]] == ["system", "hybrid", "planner"]
     assert all(r["k"] <= r["n"] for r in res["rounds"])
     page = client.get("/")
     assert page.status_code == 200 and "Mission Control" in page.text
