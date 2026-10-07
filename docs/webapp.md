@@ -61,7 +61,7 @@ python -m harness_agent.webapp --groot 127.0.0.1:5556            # then start a 
 | option | what it does |
 |---|---|
 | Planner | **Nemotron** on Nebius Token Factory decides every step, or the **scripted** rule policy (no LLM) |
-| Routing | **GR00T** routes each fork first (force-controlled seating finishes a snap-in it is stuck on for 1.5 s; a retry goes to the expert), or the **expert** routes every fork |
+| Routing | **GR00T** routes each fork first (force-controlled seating finishes a snap-in it is stuck on for 1.5 s; a retry goes to the expert, and once a fork has lost its wire the expert does the rest of the routing), or the **expert** routes every fork |
 | Disturbance | the wire is pulled out of the second fork after it was routed, and/or the connector slips out of the fingers; the planner is not told |
 | Camera | a vision model on Token Factory checks every fixture in rendered images before the planner may finish |
 | Board | with *varied* on, the number picks a randomised board (the fixtures moved a little, the wire's stiffness, friction and slack varied); off, the spec's nominal board |

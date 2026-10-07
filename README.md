@@ -478,7 +478,8 @@ the cell's action interface, and the instruction "route the wire into fork F2").
 policy is served by GR00T's own policy server; `GrootRunner` plugs it into the session as the
 executor of `route_fork`, so Nemotron's tool call becomes GR00T's instruction and the
 admittance controller underneath stays the same. The skill result says which controller ran
-it (`executed_by`), and by default a retry falls back to the expert.
+it (`executed_by`), by default a retry falls back to the expert, and once a fork has lost its
+wire (a disturbance, or a later try that pulled it out) the expert does the rest of the routing.
 
 ```bash
 python -m harness_agent.groot_data bench                     # renderer and recording speed of this machine

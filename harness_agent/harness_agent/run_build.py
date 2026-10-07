@@ -17,6 +17,8 @@ model on Token Factory gives its verdict next to perception's (images in inspect
 --groot hands route_fork to the fine-tuned GR00T N1.7 policy served at HOST:PORT (default
 127.0.0.1:5556): the planner's tool call becomes GR00T's instruction, and a failed attempt
 is retried by the force-guided expert (--groot-attempts all lets GR00T take retries too).
+Once a fork that held the wire has lost it (a disturbance, or a later try that pulled it out),
+the expert does the rest of the routing (--groot-after-lost-wire keeps GR00T on).
 """
 
 from __future__ import annotations
@@ -154,6 +156,9 @@ def main(argv: Optional[list] = None) -> int:
                     help="time limit of one GR00T attempt (default 40 s, 60 s with restarts)")
     ap.add_argument("--groot-ensemble", type=float, default=None, metavar="DECAY",
                     help="ask GR00T for a chunk every 4 steps and average the overlapping chunks (try 0.1)")
+    ap.add_argument("--groot-after-lost-wire", action="store_true",
+                    help="let GR00T keep routing after a fork has lost its wire (by default the expert takes "
+                         "over the routing from then on)")
     ap.add_argument("--groot-seat-assist", type=float, default=None, metavar="SECONDS",
                     help="hybrid: the expert's seating takes over a wire GR00T holds stuck over the slot this long "
                          "(try 1.5)")
@@ -201,7 +206,9 @@ def main(argv: Optional[list] = None) -> int:
                                 seat_assist=args.groot_seat_assist, ensemble_decay=args.groot_ensemble,
                                 execute_horizon=4 if args.groot_ensemble is not None else 8)
         session.skill_runners["route_fork"] = runner
-        print(f"  route_fork: {runner.name} on attempts {args.groot_attempts}, the expert otherwise")
+        session.expert_after_lost_wire = not args.groot_after_lost_wire
+        print(f"  route_fork: {runner.name} on attempts {args.groot_attempts}, the expert otherwise"
+              + ("" if args.groot_after_lost_wire else " and once a fork has lost its wire"))
 
     from .disturbances import make_scenario
     scenario = make_scenario(args.scenario, session.route) if session.feasible else None

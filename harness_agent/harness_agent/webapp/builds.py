@@ -231,6 +231,7 @@ def run(build: Build) -> None:
                                     ensemble_decay=o.groot_ensemble,
                                     execute_horizon=4 if o.groot_ensemble is not None else 8)
             session.skill_runners["route_fork"] = runner
+            session.expert_after_lost_wire = True       # recoveries after a lost wire go to the expert
         scenario = make_scenario(o.scenario, session.route) if session.feasible else None
         for trig in (scenario.triggers if scenario is not None else []):    # mark the disturbance frames
             act = trig.action

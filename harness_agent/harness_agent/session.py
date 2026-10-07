@@ -119,6 +119,11 @@ class CellSession:
         # perturbs the action that is executed (after step_hook saw the clean one), e.g. DART demos
         self.action_noise: Optional[Callable[[np.ndarray], np.ndarray]] = None
         self.skill_runners: Dict[str, Any] = {}   # skill name -> learned policy runner (e.g. GR00T)
+        # with a learned router: once a fork that held the wire has lost it (a disturbance, or a later
+        # try that pulled it out), the force-guided expert does the rest of the routing in this build
+        self.expert_after_lost_wire = False
+        self._routed: set = set()            # forks this build routed (one of them empty again = a lost wire)
+        self.lost_wire = ""                  # which fork lost its wire, once one has
         if self.feasible:
             self.env = HarnessRoutingEnv(cfg=self.cfg, randomize=randomize,
                                          max_episode_time=max_sim_time + 60.0,
@@ -351,6 +356,9 @@ class CellSession:
                                 f"{fork_id} is not on this wire's route {self.route}")
         state = self.perceive()
         missing = [f for f in self.route[:i] if not state["forks"][f]["wire_in_slot"]]
+        lost = [f for f in self.route[:i + 1] if f in self._routed and not state["forks"][f]["wire_in_slot"]]
+        if lost and not self.lost_wire:
+            self.lost_wire = ", ".join(lost)
         if missing:
             return self._refuse("route_fork", args, "previous_fork_not_seated",
                                 f"route {fork_id} only after {', '.join(missing)}: the wire is anchored "
@@ -358,7 +366,15 @@ class CellSession:
         t_wall = time.perf_counter()
         self.expert.current_fork = i
         runner = self.skill_runners.get("route_fork")
+        handover = ""
         if runner is not None and runner.wants("route_fork", fork_id, int(attempt)):
+            if self.expert_after_lost_wire and self.lost_wire:
+                handover = (f"the force-guided expert routes from here on: {self.lost_wire} lost the wire "
+                            f"earlier in this build")
+                runner = None
+        else:
+            runner = None
+        if runner is not None:
             # a learned policy (GR00T) does this step instead of the expert
             self.expert.phase = "learned_policy"
             run = self._drive(runner.route_fork(self, i), budget=runner.max_seconds)
@@ -378,11 +394,17 @@ class CellSession:
                     controller = f"{runner.name} + seating assist"
             if not ok:
                 self._drive(self._clear_board(), budget=6.0)
+            else:
+                self._routed.add(fork_id)
             return self._result("route_fork", args, ok, outcome, run, time.perf_counter() - t_wall,
                                 controller=controller)
         offset = None if pick_offset_mm is None else float(pick_offset_mm) / 1000.0
         run = self._drive(self.expert._route_fork(i, int(attempt), offset), budget=60.0)
+        if handover:
+            run["messages"].insert(0, handover)
         ok = bool(run["value"]) and run["reason"] == "done"
+        if ok:
+            self._routed.add(fork_id)
         outcome = "routed" if ok else _classify_fork_failure(run)
         # leave the cell tidy for the next decision: gripper open, tool up
         if not ok and run["reason"] == "done":

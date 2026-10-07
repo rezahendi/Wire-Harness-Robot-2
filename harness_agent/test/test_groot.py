@@ -549,6 +549,61 @@ def test_the_full_system_retries_a_failed_groot_call_with_the_expert():
     assert "the expert's retry 1 of the 1 it got" in text
 
 
+def test_once_a_fork_lost_its_wire_the_expert_routes_the_rest():
+    """GR00T routes F1 and F2; a disturbance pulls the wire out of F2; F3 is refused; from then on
+    the expert routes (the re-route of F2 and F3), and the result says why."""
+    from harness_agent.session import CellSession
+    from harness_agent.spec import HarnessSpec
+    spec_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "specs")
+
+    def build(handover):
+        s = CellSession(HarnessSpec.from_yaml(os.path.join(spec_dir, "demo_3fork.yaml")), seed=1003)
+        s.expert_after_lost_wire = handover
+        held = {f: False for f in s.route}
+        calls = []
+        real = s.perceive
+
+        def perceive(obs=None):
+            st = real(obs)
+            for f in s.route:
+                st["forks"][f]["wire_in_slot"] = held[f]
+            return st
+
+        def routes(who, fork):            # a skill that routes at once (no motion needed here)
+            calls.append((who, fork))
+            held[fork] = True
+            return True
+            yield
+
+        class Runner:
+            name, max_seconds, last = "GR00T (stub)", 5.0, {}
+
+            def wants(self, skill, target="", attempt=0):
+                return attempt == 0
+
+            def route_fork(self, session, i):
+                self.last = {"calls": 1, "grasped": True, "furthest": "released"}
+                return (yield from routes("groot", session.route[i]))
+
+        s.perceive = perceive
+        s.expert._route_fork = lambda i, attempt, offset=None: routes("expert", s.route[i])
+        s.skill_runners["route_fork"] = Runner()
+        out = [s.route_fork("F1"), s.route_fork("F2")]
+        held["F2"] = False                                   # the disturbance
+        out += [s.route_fork("F3"), s.route_fork("F2"), s.route_fork("F3")]
+        s.close()
+        return calls, out
+
+    calls, out = build(True)
+    assert calls == [("groot", "F1"), ("groot", "F2"), ("expert", "F2"), ("expert", "F3")]
+    assert out[2].outcome == "previous_fork_not_seated"
+    assert out[3].controller == "expert"
+    assert out[3].messages[0].startswith("the force-guided expert routes from here on")
+    assert "F2 lost the wire" in out[3].messages[0] and out[4].ok
+    calls, _ = build(False)                                  # as evaluated: GR00T takes every attempt 0
+    assert calls == [("groot", "F1"), ("groot", "F2"), ("groot", "F2"), ("groot", "F3")]
+
+
 def test_takeovers_are_written_as_episodes_merge_keeps_apart(tmp_path):
     from harness_agent.groot_data import EpisodeBuffer, episodes_in, merge
     from harness_agent.groot_eval import summarize, takeover_writer

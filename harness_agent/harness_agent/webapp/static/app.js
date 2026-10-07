@@ -716,7 +716,7 @@ function renderResult() {
     const assisted = V.calls.filter((c, k) => c && c.name === 'route_fork' && executorOf(c, k) === 'assist' && c.result && c.result.ok).length;
     let s = assisted ? `GR00T + force-controlled seating routed <b>${rt.groot_ok} of ${rt.groot_routes}</b> forks (seating finished ${assisted})`
                      : `GR00T routed <b>${rt.groot_ok} of ${rt.groot_routes}</b> forks`;
-    if (rt.expert_routes) s += `; the expert's retry <b>${rt.expert_ok} of ${rt.expert_routes}</b>`;
+    if (rt.expert_routes) s += `; the expert routed <b>${rt.expert_ok} of the ${rt.expert_routes}</b> it tried`;
     facts.push(`<li>${s}</li>`);
   }
   if (d.claimed_success != null) {
@@ -973,7 +973,7 @@ function updateHints() {
   else if (st.groot_reachable === false) gh = 'The GR00T policy server does not answer.';
   else if (S.opts.groot === '1') {
     gh = 'GR00T N1.7 routes each fork' + (gs.seat_assist != null ? `; force-controlled seating finishes a snap-in it is stuck on for ${gs.seat_assist} s` : '') +
-         '; the planner can retry a failed fork with the expert.';
+         '; the planner can retry a failed fork with the expert, and once a fork has lost its wire the expert routes the rest.';
     if (S.spec && gs.trained_on && S.spec.file !== gs.trained_on) gh += ' GR00T was trained on the Door module (3 forks): on this harness, expect the expert to do more.';
   } else gh = 'The force-guided expert routes every fork.';
   $('groot-hint').innerHTML = gh;
@@ -1098,7 +1098,7 @@ function renderResults(R) {
       <article class="card lvl groot"><div class="eyebrow">Level 2 · 20 motions a second</div><h3>GR00T N1.7 routes the wire</h3>
         <p>A vision-language-action model: from two camera views, the robot's state and "route the wire into fork F2" it moves the arm, grasps the wire and carries it over the clip. A force-controlled routine finishes a snap-in it gets stuck on.</p></article>
       <article class="card lvl ctrl"><div class="eyebrow">Level 1 · 500 times a second</div><h3>Admittance control keeps it soft</h3>
-        <p>Every motion goes through a force-limited controller with a wrist force sensor, so the wire and the clips are never forced.</p></article>
+        <p>Every motion, GR00T's included, goes through a compliant controller with a wrist force sensor: it gives way on contact and stops the arm above 120 N.</p></article>
     </section>
     <section class="two">
       <article class="card chart"><div class="card-head"><h2>Training rounds</h2><span class="sub">wires routed of ${R.rounds[0].n}, with 95% intervals</span></div>${roundsChart(R.rounds)}</article>
