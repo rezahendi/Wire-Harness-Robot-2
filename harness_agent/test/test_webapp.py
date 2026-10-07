@@ -102,3 +102,48 @@ def test_a_scripted_build_streams_live_and_can_be_replayed(client):
     assert len(saved) == len(events)
     past = client.get("/api/builds").json()
     assert past[0]["id"] == info["id"] and past[0]["summary"]["success"]
+
+
+def test_the_showcase_is_a_static_copy_without_paths(tmp_path):
+    from harness_agent.webapp.showcase import build_site
+    run = tmp_path / "runs" / "b1"
+    run.mkdir(parents=True)
+    events = [
+        {"seq": 0, "type": "scene", "geoms": []},
+        {"seq": 1, "type": "frame", "t": 0.5, "pose": [0, 0, 0], "tcp": [0, 0, 0.2], "wrench": [0, 0, 1, 0, 0, 0],
+         "grip": 0.06, "phase": "idle", "call": None, "truth": {}, "mode": 0, "debug": {"big": [1] * 50}},
+        {"seq": 2, "type": "plan", "turn": 1, "model": "m", "content": "route F1", "reasoning": "why",
+         "raw": {"usage": 1}},
+        {"seq": 3, "type": "done", "success": True, "files": ["/home/someone/runs/b1/report.md"]},
+    ]
+    (run / "events.json").write_text(json.dumps(events))
+    (run / "build.json").write_text(json.dumps({
+        "id": "b1", "status": "done", "created": 1.0,
+        "options": {"spec": "/home/someone/specs/demo_3fork.yaml", "planner": "nemotron",
+                    "groot": "127.0.0.1:5556", "seed": 3, "scenario": "nominal"},
+        "summary": {"success": True, "routing": {"groot_routes": 3}}}))
+    (run / "inspection").mkdir()
+    (run / "inspection" / "F1.jpg").write_bytes(b"\xff\xd8\xff")
+    manifest = {"title": "Showcase", "intro": "<h2>Hi</h2>",
+                "builds": [{"dir": "runs/b1", "title": "First", "blurb": "GR00T routes"}]}
+    site = tmp_path / "site"
+    res = build_site(manifest, str(site), base=str(tmp_path))
+    assert res["builds"] == 1
+
+    slim = json.loads((site / "data" / "b1.json").read_text())
+    frame, plan, done = slim[1], slim[2], slim[3]
+    assert "seq" not in frame and "debug" not in frame and frame["tcp"] == [0, 0, 0.2]
+    assert set(plan) == {"type", "turn", "model", "content", "reasoning"}
+    assert "files" not in done and done["success"] is True
+    assert (site / "data" / "b1" / "inspection" / "F1.jpg").exists()
+    assert (site / "data" / "drawing_demo_3fork.png").read_bytes()[:4] == b"\x89PNG"
+    assert (site / "data" / "results.json").exists() and (site / "vendor" / "three.min.js").exists()
+
+    for name in ("index.html", "page.html"):
+        text = (site / name).read_text()
+        assert "window.MC_STATIC" in text and "First" in text
+        assert "/home/someone" not in text and "127.0.0.1" not in text
+    page = (site / "page.html").read_text()
+    assert "<body" not in page and "<html" not in page and "cdn.jsdelivr.net/npm/three@0.147.0" in page
+    index = (site / "index.html").read_text()
+    assert index.startswith("<!doctype html>") and 'src="app.js"' in index and "/static/" not in index

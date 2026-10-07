@@ -7,7 +7,14 @@ const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (ch) => ({ '&':
 const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 const reduceMotion = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
 
+// The showcase (a static copy of the app, see showcase.py): window.MC_STATIC lists the recorded builds
+// and where their files are; everything is read from files and there is no build form.
+const STATIC = window.MC_STATIC || null;
+if (!document.body.dataset.view) document.body.dataset.view = 'build';    // a published page has no attribute of ours
+const CAPTURE = /[?&]capture\b/.test(location.search);     // frame-exact video capture (see window.__mc)
+
 async function api(path, opts) {
+  if (STATIC) return staticApi(path);
   const r = await fetch(path, opts);
   if (!r.ok) {
     let msg = r.status + ' ' + r.statusText;
@@ -15,6 +22,25 @@ async function api(path, opts) {
     throw new Error(msg);
   }
   return r.json();
+}
+
+async function getJson(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(r.status + ' ' + r.statusText + ': ' + url);
+  return r.json();
+}
+async function staticApi(path) {
+  if (path === '/api/status') return { static: true };
+  if (path === '/api/specs') return STATIC.specs || [];
+  if (path === '/api/builds') return STATIC.builds || [];
+  if (path === '/api/results') return getJson(STATIC.results);
+  const m = path.match(/^\/api\/builds\/([^/]+)\/events$/);
+  if (m) return getJson(STATIC.data + decodeURIComponent(m[1]) + '.json');
+  throw new Error('not part of this showcase: ' + path);
+}
+function buildFileUrl(id, path) {       // a file of a build: its camera-check images
+  return STATIC ? STATIC.data + encodeURIComponent(id) + '/' + path
+                : '/api/builds/' + encodeURIComponent(id) + '/files/' + path;
 }
 
 // ------------------------------------------------------------------ words
@@ -281,7 +307,7 @@ function initScene(sc) {
   const camera = new THREE.PerspectiveCamera(38, 1.6, 0.01, 30);
   camera.up.set(0, 0, 1);
   const controls = new THREE.OrbitControls(camera, renderer.domElement);
-  controls.enableDamping = !reduceMotion;
+  controls.enableDamping = !reduceMotion && !CAPTURE;
   controls.dampingFactor = 0.12;
   controls.minDistance = 0.08;
   controls.maxDistance = 4;
@@ -414,9 +440,10 @@ function setFollow(on) {
 }
 function resize() {
   if (!T3) return;
-  const r = $('stage').getBoundingClientRect();
+  const st = $('stage'), r = st.getBoundingClientRect();
   if (r.width < 2 || r.height < 2) return;
   T3.w = r.width; T3.h = r.height;
+  T3.cw = st.clientWidth; T3.ch = st.clientHeight;
   T3.renderer.setSize(r.width, r.height, false);
   T3.camera.aspect = r.width / r.height;
   T3.camera.updateProjectionMatrix();
@@ -454,7 +481,7 @@ function draw3D(i, a) {
   // the fixture the current step is about (none while the planner is choosing the next one)
   const c = V.live && V.thinking && !V.done ? null : V.calls[f0.call];
   const args = (c && c.arguments) || {};
-  const pulse = reduceMotion ? 1 : 1 + 0.07 * Math.sin(performance.now() / 260);
+  const pulse = reduceMotion ? 1 : 1 + 0.07 * Math.sin((CAPTURE ? V.t * 1000 : performance.now()) / 260);
   let anchor = null, anchorIdx = -1;
   T.halos.forEach((h, n) => {
     const fx = T.fixtures[n];
@@ -519,7 +546,8 @@ const tEnd = () => (V.frames.length ? V.frames[V.frames.length - 1].t : 0);
 // ------------------------------------------------------------------ decisions
 function isOpen(k) { return V.pinned.has(k) ? V.pinned.get(k) : k === V.cur; }
 function decisionHtml(c, k) {
-  const o = outcomeOf(c), who = executorOf(c, k), r = c.result || {};
+  const now = c.running ? (V.nowCall === k && ['groot', 'assist', 'expert'].includes(V.nowActor) ? V.nowActor : null) : null;
+  const o = outcomeOf(c), who = c.running ? now : executorOf(c, k), r = c.result || {};
   const bits = [];
   if (who) bits.push(`<span class="pill ${who}">${who === 'assist' ? 'GR00T + seating' : ACTOR[who].short}</span>`);
   if (c.t_end != null && c.t_end - c.t_start >= 0.05) bits.push(`<span>${fmtTime(c.t_end - c.t_start)}</span>`);
@@ -527,18 +555,28 @@ function decisionHtml(c, k) {
   const why = c.reasoning
     ? `<div class="why"><span class="lbl">${V.planner === 'nemotron' ? 'Nemotron\'s reasoning' : 'Why'}</span>${esc(c.reasoning)}</div>` : '';
   const msgs = (r.messages && r.messages.length) ? `<div class="msgs">${r.messages.map((m) => `<span>${esc(m)}</span>`).join('')}</div>` : '';
-  const checks = c.checks.length ? `<div class="msgs">${c.checks.map((v) => {
+  const checks = c.checks.length ? `<div class="cams">${c.checks.map((v) => {
     const vd = v.verdict || {};
-    return `<span class="cam">camera check, ${esc(v.target)}: ${vd.error ? 'no answer' : (vd.seated ? 'seated' : 'not seated')}${vd.confidence != null ? ' (' + Math.round(vd.confidence * 100) + '%)' : ''}</span>`;
-  }).join('')}</div>` : '';
+    const verdict = vd.error ? 'no answer' : (vd.seated ? 'seated' : 'not seated');
+    const url = vd.image ? buildFileUrl(V.id, 'inspection/' + vd.image) : '';
+    return `<figure class="cam ${vd.error ? '' : (vd.seated ? 'ok' : 'bad')}">` +
+      (url ? `<a href="${esc(url)}" target="_blank" rel="noopener"><img loading="lazy" src="${esc(url)}" alt="The two views the camera check of ${esc(v.target)} looked at"></a>` : '') +
+      `<figcaption><b>${esc(v.target)}: ${verdict}</b>${vd.confidence != null ? ' · ' + Math.round(vd.confidence * 100) + '%' : ''}` +
+      `${vd.evidence ? `<span>${esc(vd.evidence)}</span>` : ''}</figcaption></figure>`;
+  }).join('')}${(c.checks[0].verdict || {}).model ? `<p class="cam-model">vision model: ${esc(String(c.checks[0].verdict.model).split('/').pop())} on Nebius Token Factory</p>` : ''}</div>` : '';
   return `<li class="decision${k === V.cur ? ' cur' : ''}" data-k="${k}"><details data-k="${k}"${isOpen(k) ? ' open' : ''}><summary>
     <span class="n">${k + 1}</span><span class="what">${esc(callTitle(c))}</span><span class="pill ${o.cls}">${esc(o.text)}</span>
     ${bits.length ? `<span class="who">${bits.join('')}</span>` : ''}</summary>${why}${msgs}${checks}</details></li>`;
 }
+// a call as it stood at robot time V.t: the video replays the decisions as they happened
+function callAt(c) {
+  if (!V.progressive || c.t_end == null || c.t_end <= V.t + 1e-6) return c;
+  return { ...c, result: null, t_end: null, running: true };
+}
 function renderDecisions() {
   const box = $('decisions');
   if (!V) { box.innerHTML = EMPTY_DECISIONS; return; }
-  const items = V.calls.map((c, k) => (c ? decisionHtml(c, k) : '')).join('');
+  const items = V.calls.map((c, k) => (!c || (V.progressive && c.t_start > V.t + 1e-6) ? '' : decisionHtml(callAt(c), k))).join('');
   const think = V.live && V.thinking && !V.done && !V.failed
     ? `<li class="decision thinking"><details open><summary><span class="n">${V.calls.length + 1}</span>
        <span class="what"><span class="live-dot"></span>Nemotron is reading the result and choosing the next step…</span></summary></details></li>` : '';
@@ -608,7 +646,7 @@ function renderNow(i) {
     : (f.actor === 'assist' ? 'Force-controlled seating: ' + pt : pt);
   const w = f.wrench, Fm = Math.hypot(w[0], w[1], w[2]);
   setHTML('st-force', Fm.toFixed(1) + '<small>N</small>');
-  setHTML('st-grip', Math.round(f.grip) + '<small>mm</small>');
+  setHTML('st-grip', Math.max(0, Math.round(f.grip)) + '<small>mm</small>');
   const prev = V.frames[Math.max(0, i - 1)];
   const dt = Math.max(1e-3, f.t - prev.t);
   const sp = i > 0 ? Math.hypot(f.tcp[0] - prev.tcp[0], f.tcp[1] - prev.tcp[1], f.tcp[2] - prev.tcp[2]) / 10 / dt : 0;
@@ -725,7 +763,7 @@ function renderResult() {
   }
   if (d.tokens) facts.push(`<li><b>${d.tokens.toLocaleString()}</b> tokens</li>`);
   if (d.scenario && d.scenario !== 'nominal') facts.push(`<li>disturbance: <b>${esc(SCENARIO_TEXT[d.scenario] || d.scenario)}</b></li>`);
-  const files = (d.files || []).filter((f) => /\.(md|json)$/.test(f) && f !== 'events.json' && f !== 'build.json');
+  const files = STATIC ? [] : (d.files || []).filter((f) => /\.(md|json)$/.test(f) && f !== 'events.json' && f !== 'build.json');
   const more = (d.report || files.length || V.infeasible) ? `<details><summary>${d.report ? 'The planner\'s report' : 'Files'}</summary>
       ${V.infeasible ? issuesHtml(V.infeasible) : ''}${d.report ? `<div class="report">${esc(d.report)}</div>` : ''}
       ${files.length ? `<div class="files">${files.map((f) => `<a href="/api/builds/${encodeURIComponent(V.id)}/files/${encodeURIComponent(f)}" target="_blank" rel="noopener">${esc(f)}</a>`).join('')}</div>` : ''}</details>` : '';
@@ -801,6 +839,10 @@ document.addEventListener('keydown', (e) => {
 // ------------------------------------------------------------------ main loop
 let lastWall = null;
 function loop(now) {
+  if (CAPTURE) { requestAnimationFrame(loop); return; }     // the capture draws each frame itself (window.__mc.render)
+  // the stage can change size and back within one task (a build replaced by another), which the
+  // ResizeObserver does not report: compare every frame
+  if (T3) { const st = $('stage'); if (st.clientWidth !== T3.cw || st.clientHeight !== T3.ch) resize(); }
   if (V && V.frames.length) {
     if (V.playing && !V.live && lastWall !== null) {
       const dt = Math.min((now - lastWall) / 1000, 0.1);
@@ -911,8 +953,9 @@ async function loadPast() {
     const bits = [when.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }),
                   o.planner === 'nemotron' ? 'Nemotron' : 'scripted', o.groot != null ? 'GR00T' : 'expert',
                   o.scenario && o.scenario !== 'nominal' ? (SCENARIO_TEXT[o.scenario] || o.scenario) : '', 'board ' + o.seed].filter(Boolean);
-    return `<li><button type="button" data-id="${esc(b.id)}" title="${esc(b.id)}"><span class="p-title">${esc(s.spec || specName(o.spec))}</span><span class="p-res ${res[0]}">${res[1]}</span>
-      <span class="p-sub">${esc(bits.join(' · '))}</span></button></li>`;
+    const title = b.title || s.spec || specName(o.spec);          // the showcase names its builds
+    return `<li><button type="button" data-id="${esc(b.id)}" title="${esc(b.id)}"><span class="p-title">${esc(title)}</span><span class="p-res ${res[0]}">${res[1]}</span>
+      <span class="p-sub${b.blurb ? ' wrap' : ''}">${esc(b.blurb || bits.join(' · '))}</span></button></li>`;
   }).join('');
   box.querySelectorAll('button').forEach((btn) => btn.addEventListener('click', () => {
     const info = pastList.find((b) => b.id === btn.dataset.id);
@@ -949,7 +992,7 @@ function selectSpec(file) {
   const s = S.specs.find((x) => x.file === file);
   S.spec = s || null;
   if (!s) return;
-  const url = '/api/specs/' + encodeURIComponent(file) + '/drawing.png';
+  const url = STATIC ? (STATIC.drawings || {})[file] || '' : '/api/specs/' + encodeURIComponent(file) + '/drawing.png';
   const img = $('spec-drawing');
   img.classList.remove('ok');
   img.onload = () => img.classList.add('ok');
@@ -997,6 +1040,7 @@ async function refreshStatus() {
   try { S.status = await api('/api/status'); } catch (e) { S.status = { offline: true }; }
   const st = S.status;
   const chip = (state, text) => `<span class="chip ${state}"><i></i>${esc(text)}</span>`;
+  if (STATIC) { $('status').innerHTML = chip('on', STATIC.chip || 'Recorded builds'); return; }
   $('status').innerHTML = st.offline ? chip('off', 'Server not answering') :
     chip(st.nebius_key ? 'on' : 'off', st.nebius_key ? 'Nemotron ready' : 'No Nebius key') +
     chip(st.groot == null ? '' : (st.groot_reachable !== false ? 'on' : 'off'), st.groot == null ? 'GR00T off' : (st.groot_reachable === false ? 'GR00T server down' : 'GR00T N1.7 ready')) +
@@ -1145,13 +1189,117 @@ segSetup('opt-groot', 'groot', updateHints);
 segSetup('opt-vision', 'vision');
 segSetup('opt-pace', 'pace');
 drawSpark(-1);
+// ------------------------------------------------------------------ the showcase
+function setupShowcase() {
+  document.body.classList.add('showcase');
+  const left = document.querySelector('.col.left');
+  const intro = document.createElement('section');
+  intro.className = 'card intro';
+  intro.innerHTML = STATIC.intro || '';
+  const builds = $('h-past').closest('.card');
+  left.prepend(intro, builds);                 // the recorded builds first, then the harness
+  $('h-past').textContent = STATIC.buildsTitle || 'Recorded builds';
+  $('spec-select').disabled = true;
+}
+
+// Frame-exact capture for the video (?capture): the page draws a given robot time on request.
+const capture = {
+  async open(id) {
+    const info = pastList.find((b) => b.id === id);
+    if (!info) throw new Error('no build ' + id);
+    await openPast(info);
+    setPlaying(false);
+    const sc = V.scene || {};
+    return { t0: tStart(), t1: tEnd(), calls: V.calls.map((c) => c && { name: c.name, arguments: c.arguments, t0: c.t_start, t1: c.t_end }),
+             dists: V.dists, spans: actorSpans(), forks: sc.forks, holder: sc.holder, board_z: sc.board_z };
+  },
+  render(t) {                                  // draw everything at robot time t, now
+    if (T3) { const st = $('stage'); if (st.clientWidth !== T3.cw || st.clientHeight !== T3.ch) resize(); }
+    V.t = Math.min(tEnd(), Math.max(tStart(), t));
+    const [i, a] = frameAt(V.t);
+    if (T3) draw3D(i, a);
+    lastStat = 0; lastStatI = -1;
+    if (V.progressive) {                       // decisions appear as their calls start, outcomes as they end
+      const f = V.frames[i];
+      V.nowCall = f.call; V.nowActor = f.actor;
+      const key = V.calls.filter((c) => c && c.t_start <= V.t + 1e-6).length + '|' +
+                  V.calls.filter((c) => c && c.t_end != null && c.t_end <= V.t + 1e-6).length + '|' + f.call + f.actor;
+      if (key !== V.progressKey) { V.progressKey = key; renderDecisions(); V.cur = -2; }
+    }
+    renderNow(i);
+    renderBanner(i);
+    if (V.showDecision != null) {
+      const el = document.querySelector(`.decision[data-k="${V.showDecision}"]`), box = $('decisions');
+      if (el) box.scrollTop += el.getBoundingClientRect().top - box.getBoundingClientRect().top - 6;
+    }
+    const frac = (V.t - tStart()) / Math.max(tEnd() - tStart(), 1e-6);
+    $('scrub-head').style.left = (100 * frac).toFixed(3) + '%';
+    $('scrub-range').value = Math.round(1000 * frac);
+    return { t: V.t, actor: V.frames[i].actor, call: V.frames[i].call, phase: V.frames[i].phase, tcp: V.frames[i].tcp };
+  },
+  view(pos, target) {                          // place the camera (world metres); no argument: the home view
+    if (!T3) return null;
+    T3.follow = false;
+    T3.userMoved = true;
+    const h = T3.home;
+    T3.camera.position.set(...(pos || [h.pos.x, h.pos.y, h.pos.z]));
+    T3.controls.target.set(...(target || [h.target.x, h.target.y, h.target.z]));
+    T3.controls.update();
+    return { pos: T3.camera.position.toArray(), target: T3.controls.target.toArray() };
+  },
+  home() { return T3 && T3.home ? { pos: T3.home.pos.toArray(), target: T3.home.target.toArray() } : null; },
+  caption(html, where) {                       // a caption over the 3D view, or the screen ('screen'); '' hides it
+    let el = $('caption');
+    if (!el) { el = document.createElement('div'); el.id = 'caption'; }
+    const parent = where === 'screen' ? document.body : $('stage');
+    if (el.parentNode !== parent) parent.appendChild(el);
+    el.className = 'caption ' + (where || 'bottom');
+    el.innerHTML = html || '';
+    el.hidden = !html;
+  },
+  open_decision(k, open) {                     // open (or close) a decision and bring it into view
+    V.pinned.set(k, !!open); V.progressKey = ''; renderDecisions(); V.cur = -2;
+    V.showDecision = open ? k : null;           // render() scrolls it into view
+  },
+  follow: (on) => setFollow(!!on),
+  scroll(y) { const m = document.getElementById('view-results'); m.scrollTop = y; window.scrollTo(0, y); },
+  ui(opts) {                                   // show or hide parts of the page (the video tells the result at the end)
+    if ('result' in opts) $('result-card').hidden = !opts.result || !V || (!V.done && !V.failed);
+    if ('transport' in opts) $('transport').hidden = !opts.transport;
+    if ('progressive' in opts) { V.progressive = !!opts.progressive; V.progressKey = ''; renderDecisions(); }
+    if ('wide' in opts) document.body.classList.toggle('video', !!opts.wide);     // no left column: a bigger 3D view
+  },
+  debug: () => T3 && { w: T3.w, h: T3.h, aspect: T3.camera.aspect, buffer: [T3.renderer.domElement.width, T3.renderer.domElement.height],
+                       stage: (() => { const r = $('stage').getBoundingClientRect(); return [r.width, r.height]; })() },
+  theme: (th) => setTheme(th),
+  tab: (name) => showTab(name)
+};
+function actorSpans() {
+  const out = [];
+  let cur = null;
+  for (const f of V.frames) {
+    if (!cur || cur.a !== f.actor) { cur = { a: f.actor, s: f.t, e: f.t }; out.push(cur); } else cur.e = f.t;
+  }
+  return out;
+}
+if (STATIC || CAPTURE) window.__mc = capture;
+
 (async function boot() {
+  if (STATIC) setupShowcase();
   await refreshStatus();
   try { await loadSpecs(); } catch (e) { $('spec-checks').innerHTML = `<div class="issue error"><b>error</b><span>${esc(e.message)}</span></div>`; }
   await loadPast();
   if (location.hash === '#results') showTab('results');
+  if (STATIC) {
+    const want = new URLSearchParams(location.search).get('build');
+    const first = pastList.find((b) => b.id === want) || pastList[0];
+    if (first && !CAPTURE) openPast(first);
+    document.body.dataset.ready = '1';
+    return;
+  }
   const running = pastList.find((b) => b.status === 'running' || b.status === 'queued');
   if (running) openPast(running);
   setInterval(refreshStatus, 15000);
+  document.body.dataset.ready = '1';
 })();
 })();

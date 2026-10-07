@@ -309,3 +309,53 @@ select, input[type="number"] { background: var(--panel-2); border: 1px solid var
   .spark { height: 48px; }
   .result-facts { font-size: 13px; }
 }
+
+/* ---------- the showcase: recorded builds, no build form */
+.showcase .form, .showcase .upload { display: none; }
+.intro h2 { font-size: 21px; }
+.intro p { margin: 0; font-size: 13.5px; color: var(--ink-2); }
+.intro .links { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 13px; }
+.intro a { color: var(--planner); font-weight: 600; text-decoration: none; }
+.intro a:hover { text-decoration: underline; }
+.past .p-sub.wrap { white-space: normal; line-height: 1.35; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; }
+.past button[aria-current="true"] .p-sub.wrap { -webkit-line-clamp: 6; line-clamp: 6; }
+.past .p-title { white-space: normal; }
+
+/* ---------- the camera check: what the vision model saw */
+.cams { margin: 0 10px 10px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.cam { margin: 0; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; background: var(--panel-2); display: grid; align-content: start; }
+.cam.ok { border-color: color-mix(in srgb, var(--ok) 40%, var(--line)); }
+.cam.bad { border-color: color-mix(in srgb, var(--bad) 50%, var(--line)); }
+.cam img { display: block; width: 100%; aspect-ratio: 1030 / 414; object-fit: cover; background: #fff; }
+.cam figcaption { padding: 5px 7px 7px; font-size: 12px; line-height: 1.35; color: var(--ink-2); display: grid; gap: 2px; }
+.cam figcaption b { color: var(--ink); font-weight: 600; }
+.cam figcaption span { color: var(--muted); }
+.cam-model { grid-column: 1 / -1; margin: 0; font-size: 11.5px; color: var(--muted); }
+
+/* ---------- a caption over the 3D view (the video) */
+.caption { position: absolute; left: 50%; transform: translateX(-50%); max-width: min(86%, 980px); padding: 12px 22px 13px; border-radius: 12px; background: rgba(12, 15, 19, .84); color: #fff; font: 600 27px/1.28 var(--f-body); text-align: center; box-shadow: 0 6px 24px rgba(0, 0, 0, .25); text-wrap: balance; z-index: 3; }
+.caption.bottom { bottom: 22px; }
+.stage:has(#caption:not([hidden])) .three-legend { display: none; }
+.caption.top { top: 70px; }
+.caption.screen { position: fixed; bottom: 46px; }
+.caption small { display: block; margin-top: 4px; font-weight: 500; font-size: 19px; opacity: .86; }
+.caption .k-groot { color: #9fe03b; } .caption .k-assist { color: #ffb347; } .caption .k-expert { color: #7cb8ff; }
+.caption .k-planner { color: #b7a6ff; } .caption .k-warn { color: #ff9a6e; }
+
+/* ---------- narrow screens: the 3D view first in the showcase, no legend over a small view */
+@media (max-width: 1099px) {
+  .showcase .col.center { order: -1; }
+}
+@media (max-width: 640px) {
+  .three-legend { display: none; }
+  .caption { font-size: 18px; }
+  .caption small { font-size: 14px; }
+}
+
+/* ---------- the video: no left column, a bigger 3D view */
+body.video .col.left { display: none; }
+@media (min-width: 1100px) {
+  body.video .layout { grid-template-columns: minmax(0, 1fr) 470px; }
+  body.video .col.right, body.video .result { zoom: 1.18; }      /* readable in a video player */
+  body.video .robot-card .log { display: none; }
+}

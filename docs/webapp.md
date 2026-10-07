@@ -91,3 +91,26 @@ gripper, the skill's phase and new log lines), `planner`, `plan` (Nemotron's rea
 
 Tests: `harness_agent/test/test_webapp.py` (needs `httpx`; the whole-build test runs with
 `HARNESS_SLOW_TESTS=1`).
+
+## The showcase: recorded builds without a server
+
+`python -m harness_agent.webapp.showcase showcase.json --out site/` turns builds the app
+recorded (folders under `~/runs/webapp`) into a static copy of the page that replays them in
+the browser, with no server, GPU or key. `showcase.json` names the builds and the text above
+them:
+
+```json
+{"title": "Wire Harness Mission Control",
+ "intro": "<h2>A robot cell that builds wire harnesses</h2><p>...</p>",
+ "builds": [{"dir": "runs/webapp/20261007-175405-f86d", "title": "Wire pulled out mid-build",
+             "blurb": "Nemotron notices, re-plans and the expert routes the rest."}]}
+```
+
+`site/` holds `index.html` (serve the folder with `python -m http.server`), `page.html` (the
+same page as one file with three.js from a CDN, for hosts that wrap a page in their own
+skeleton) and `data/`: each build's events with only what the page draws, its camera-check
+images, the drawings and `results.json`. File paths and server addresses are left out.
+
+`?capture` puts the page in frame-exact mode for recording a video: `window.__mc.render(t)`
+draws the build at robot time `t`, and `__mc.view`, `__mc.caption` and `__mc.ui` set the
+camera, a caption and which parts of the page show.
