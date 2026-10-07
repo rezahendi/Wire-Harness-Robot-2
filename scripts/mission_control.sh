@@ -83,6 +83,6 @@ else
     fi
 fi
 
-say "Mission Control on port $APP_PORT. On the laptop: ssh -L $APP_PORT:localhost:$APP_PORT $USER@<the VM's IP>"
+say "Mission Control on port $APP_PORT. On the laptop: ssh -L $APP_PORT:localhost:$APP_PORT $(whoami)@<the VM's IP>"
 say "then open http://localhost:$APP_PORT   (Ctrl-c here stops it)"
 python -m harness_agent.webapp --port "$APP_PORT" --runs "$RUNS" "${GROOT_ARGS[@]}"
