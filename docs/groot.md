@@ -37,7 +37,7 @@ Then, from WSL: `ssh <username>@<public-ip>` and type `yes` the first time.
 ## 2. Code and setup (on the VM)
 
 ```bash
-git clone https://github.com/rezahendi/Wire-Harness-Robot-2.git   # private repo: user name + a GitHub token
+git clone https://github.com/rezahendi/Wire-Harness-Robot-2.git
 bash Wire-Harness-Robot-2/scripts/setup_groot_vm.sh                # ~15 min: packages, ~/simenv, ~/Isaac-GR00T
 ```
 

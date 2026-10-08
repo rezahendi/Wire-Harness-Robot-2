@@ -48,6 +48,18 @@ moving the robot (GR00T, force-controlled seating or the expert), every decision
 and its reasoning, the forces, and the result ([`docs/webapp.md`](docs/webapp.md)). The live
 demo above is the same page replaying builds recorded on a Nebius GPU VM.
 
+## NVIDIA models and Nebius in this project
+
+| model | runs on | what it does here |
+|---|---|---|
+| **NVIDIA Nemotron 3 Super** (`nvidia/nemotron-3-super-120b-a12b`) | Nebius Token Factory (OpenAI-compatible API with tool calling) | the planner: one tool call per step, recovery, the final report ([`agent.py`](harness_agent/harness_agent/agent.py), [`llm.py`](harness_agent/harness_agent/llm.py)) |
+| **NVIDIA Isaac GR00T N1.7** (`nvidia/GR00T-N1.7-3B`) | Nebius AI Cloud, one L40S VM: demo recording, fine-tuning, closed-loop evaluation and serving | the wire-routing skill from camera images ([`groot_skill.py`](harness_agent/harness_agent/groot_skill.py), [`docs/groot.md`](docs/groot.md)) |
+| Kimi K3, MiniCPM-V 4.5 | Nebius Token Factory | the camera check before a build may finish ([`vision.py`](harness_agent/harness_agent/vision.py)); no NVIDIA vision model was on Token Factory |
+
+Mission Control's live builds run on the same VM: GR00T's policy server next to the simulator,
+Nemotron through Token Factory. What worked and what would have helped, for Nebius and NVIDIA:
+[`docs/feedback_nebius_nvidia.md`](docs/feedback_nebius_nvidia.md).
+
 ## Nemotron as the supervisor
 
 **NVIDIA Nemotron 3 Super on Nebius Token Factory supervises the robot.** It reads the harness

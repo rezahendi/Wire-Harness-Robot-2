@@ -1,7 +1,10 @@
-# Feedback: building a physical-AI agent on Nebius Token Factory with NVIDIA Nemotron
+# Feedback: Nebius Token Factory, Nebius AI Cloud, NVIDIA Nemotron and Isaac GR00T N1.7
 
-What we learned building this project (September 2026), with the numbers behind it. Everything
-here comes from our own runs; `runs/*/trace.json` has the raw calls.
+What we learned building this project (September and October 2026), with the numbers behind it.
+Everything here comes from our own runs; `runs/*/trace.json` has the raw planner calls and
+`docs/groot.md` the GR00T runbook.
+
+# Nebius Token Factory and NVIDIA Nemotron
 
 ## What worked very well
 
@@ -54,3 +57,68 @@ does not support image input". That made capability discovery by probing cheap.
 | moonshotai/Kimi-K3 | camera check, first opinion | ~670 images | 12-27 s | 100% right on the 114/134 it answered (style v3 + examples) |
 | openbmb/MiniCPM-V-4_5 | camera check, fallback | ~800 images | 0.8 s | fast; examples in the prompt made it worse |
 | google/gemma-3-27b-it | compared | ~800 images | 2-3 s | leaned towards "seated" |
+
+# NVIDIA Isaac GR00T N1.7
+
+We fine-tuned GR00T N1.7 (`nvidia/GR00T-N1.7-3B`) as the cell's wire-routing skill: two cameras,
+a 79-value state with the wrist force/torque reading, 5-D actions at 20 Hz and the instruction
+"route the wire into fork F2", about 2,700 episodes in the last round.
+
+## What worked very well
+
+**A new embodiment without touching GR00T's code.** A modality config for `NEW_EMBODIMENT` and
+LeRobot v2 data were all it took. Before any training, GR00T's own policy server replaying our
+recorded set routed 6 of 6 wires through our client, which checked the data, the config and the
+client end to end in ten minutes.
+
+**One policy for every clip.** The language instruction carries the target fork, so one model
+routes F1, F2 and F3, and the planner's tool call becomes GR00T's instruction unchanged.
+
+**Training cost.** 20,000 steps at batch 32 take about 4.5 hours on one L40S (1.2-1.3 steps/s),
+so a full round (record, train, evaluate) fits in a night on one GPU.
+
+## What would have helped
+
+1. **The default port.** The policy server listens on 5555, where DCGM's `nv-hostengine` already
+   runs on NVIDIA's GPU images, so the server fails with "Address already in use". A different
+   default, or a message that names the cause, would save the first hour.
+2. **A clone without Git LFS.** `uv sync` fails on the torchcodec wheel when the repository was
+   cloned without LFS (the wheel is an LFS pointer). A check in the setup that says "run git lfs
+   pull" would make the error obvious.
+3. **The gated backbone, up front.** `nvidia/Cosmos-Reason2-2B` is gated on Hugging Face and the
+   setup only finds out with a `GatedRepoError` once it downloads. One line at the top of the
+   fine-tuning guide would do.
+4. **Checkpoint size.** A checkpoint with optimizer state is about 36 GB, so a 200 GB disk fills
+   during a long run unless `--save-total-limit` is set. A weights-only option for intermediate
+   checkpoints would help.
+5. **Batched serving.** The policy server answers one request at a time (about 245 ms per action
+   chunk on an L40S). Closed-loop evaluation runs several simulators in parallel, and their
+   requests wait in line; batching requests from several clients would make evaluation several
+   times faster.
+6. **Temporal ensembling as an option.** Averaging overlapping action chunks (as in ACT) steadied
+   the motion near the clip for us; we wrote it in our client. A built-in option would let
+   others try it with one flag.
+7. **What the knobs trade off.** More denoising steps and switching state dropout off both made
+   our results worse. A short note on when to change them would save experiments.
+
+# Nebius AI Cloud
+
+We used one L40S VM (8 vCPU, 32 GiB, CUDA image) for everything GPU-side: recording demos in
+MuJoCo with GPU rendering through EGL, fine-tuning GR00T, closed-loop evaluation, and the live
+Mission Control runs with GR00T served next to the simulator and Nemotron on Token Factory.
+
+## What worked very well
+
+**One machine for the whole loop.** On the CUDA image, the two policy cameras rendered through
+EGL in 4.4 ms per step on the L40S, and GR00T trained and served on the same machine as the
+simulator, so a live build needed no second server.
+
+**Preemptible VMs for the long jobs.** Recording and training ran on a preemptible VM at a
+fraction of the price; with every step resumable, a preemption cost minutes, not the run.
+
+## What would have helped
+
+1. **Shutting down from inside.** `sudo shutdown` inside the VM did not stop it: it came back
+   up and kept billing, and only a stop in the console ended the charges. A warning in the
+   console (or treating an OS shutdown as a stop) would save money for everyone who stops a
+   machine the way they would stop a laptop.
