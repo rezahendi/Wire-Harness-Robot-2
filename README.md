@@ -1,33 +1,53 @@
-# Wire-harness routing robot (ROS 2 Jazzy + MuJoCo)
+# Mission Control: a robot cell that builds wire harnesses
 
-A simulated robot cell for **force-guided wire harness assembly**: a UR5e-class arm with a
-wrist force/torque sensor and a parallel gripper routes a deformable wire through three
-**snap-in forks** on a formboard and seats its **connector** in a holder. It comes with
+**NVIDIA Nemotron plans. NVIDIA Isaac GR00T N1.7 routes the wire. Force control seats it.**
 
-* a physics simulation in MuJoCo (the wire is a Cosserat-rod cable, the forks have
-  spring-loaded, barbed jaws, the connector has to find a pocket with 0.8 mm clearance and
-  clicks into its latch when pressed fully down),
-* a **UR-driver-like ROS 2 interface** (joint states, wrist wrench, compliance targets,
-  joint trajectories, gripper action, TF, RViz markers),
-* a **500 Hz Cartesian compliance (admittance) controller**, like UR force mode or FZI's
-  `cartesian_compliance_controller`,
-* a **scripted, force-guided expert** that solves the task on randomised layouts,
-* a **Gymnasium environment** and a **demonstration recorder** for imitation / reinforcement
-  learning, with bit-exact replay,
-* a **build agent**: NVIDIA Nemotron on Nebius Token Factory reads a harness spec, decides
-  every step, checks each result and recovers from failures, driving the robot's
-  force-controlled skills as tools (section 5),
-* **NVIDIA Isaac GR00T N1.7**, a vision-language-action model, fine-tuned to route the wire
-  from camera images, with force-controlled seating for the snap-in (section 5),
-* **Mission Control**, a web app to start builds and watch them live in 3D: who is moving the
-  robot (GR00T, force-controlled seating, the expert), every decision of the planner, the
-  forces ([`docs/webapp.md`](docs/webapp.md)),
-* a **physics benchmark suite** that measures the simulated wire against beam theory, with an
-  Isaac Sim port for comparison (section 8).
+Wire harnesses are still assembled by hand: a soft wire never lies the same way twice, so a
+fixed robot program fails. This is a simulated harness cell (a UR5e-class arm with a wrist
+force/torque sensor, MuJoCo physics, a ROS 2 Jazzy interface) where three levels work together.
+NVIDIA Nemotron 3 Super on Nebius Token Factory plans every step and recovers when something goes
+wrong, NVIDIA Isaac GR00T N1.7, fine-tuned on Nebius AI Cloud, moves the arm from camera images,
+and a force-controlled arm finishes the snap-in, inserts the connector and steps in when a step
+fails. Built for the Nebius x NVIDIA Global AI Hackathon (Physical AI).
 
-![cell](docs/media/cell.png)
+**[Live demo: Mission Control replaying real builds](https://rezahendi.github.io/Wire-Harness-Robot-2/)**
+(no install, no login: recorded runs of Nemotron and GR00T, replayed in 3D in the browser)
 
-### Nebius x NVIDIA Global AI Hackathon: the build agent
+![Mission Control: Nemotron finds that F2 has lost its wire and routes it again](docs/media/mission_control.jpg)
+
+## Results
+
+On 40 randomized test boards that were never used for training (layout, wire stiffness,
+friction, slack and wire shape all vary), three forks each: 119 routing trials.
+
+| result | |
+|---|---|
+| **97%** (115 of 119 wires) | **Full system**: GR00T first, force-controlled seating when it gets stuck at the snap-in, the expert retries an attempt that fails |
+| **86%** (102 of 119 wires) | **GR00T N1.7 + force-controlled seating**: GR00T reaches, grasps and carries the wire over the clip; a force-controlled routine finishes the snap-in when GR00T gets stuck |
+| **40 of 40 builds** | **Nemotron completes every build** in the recovery benchmark: undisturbed, with a wire pulled out of a fork, with the connector slipping out of the fingers, and both. It noticed every disturbance, re-planned, and its final verdict always matched the simulator (expert routing; hand-written rules: 37 of 40) |
+
+Each training round added data from GR00T's own mistakes (DAgger-style takeovers): GR00T with
+force-controlled seating went from 76% to 84% to 86%. Further training (more DAgger rounds, a
+dedicated snap-in skill) can raise how much of the work GR00T does on its own. Details:
+[`docs/groot.md`](docs/groot.md).
+
+## How it works
+
+| level | rate | what it does |
+|---|---|---|
+| **NVIDIA Nemotron 3 Super** on Nebius Token Factory | every step | reads the harness spec and the cell's state, calls the next skill as a tool, checks every result, recovers when something goes wrong, and may only report success after an inspection shows every fixture seated |
+| **NVIDIA Isaac GR00T N1.7**, fine-tuned on Nebius AI Cloud | 20 motions a second | a vision-language-action model: from a scene and a wrist camera, the robot's state and "route the wire into fork F2", it grasps the wire, carries it over the clip and snaps it in |
+| **Force control** | 500 times a second | a compliant arm with a wrist force sensor: finishes the snap-in when needed, inserts the connector with a spiral search, and its force-guided expert steps in if a step fails |
+
+Before a build may finish, a vision model on Token Factory checks every clip and the connector
+in camera images, as a second opinion next to perception.
+
+**Mission Control** is the cell's web app: start a build and watch it live in 3D, with who is
+moving the robot (GR00T, force-controlled seating or the expert), every decision Nemotron makes
+and its reasoning, the forces, and the result ([`docs/webapp.md`](docs/webapp.md)). The live
+demo above is the same page replaying builds recorded on a Nebius GPU VM.
+
+## Nemotron as the supervisor
 
 **NVIDIA Nemotron 3 Super on Nebius Token Factory supervises the robot.** It reads the harness
 spec, runs the force-controlled skills one tool call at a time, checks every result, recovers
@@ -53,9 +73,34 @@ fixture seated. A camera check by a vision model on Token Factory gives a second
 
 ![camera check at the end of a build](docs/media/agent_camera_check.jpg)
 
+## What is in the repo
+
 The task is chosen because it is where model-based automation struggles and learning has
 a real edge: the wire's shape is uncertain, snapping it into a fork is a force event, and the
 connector insertion needs a search under contact.
+
+* a physics simulation in MuJoCo (the wire is a Cosserat-rod cable, the forks have
+  spring-loaded, barbed jaws, the connector has to find a pocket with 0.8 mm clearance and
+  clicks into its latch when pressed fully down),
+* a **UR-driver-like ROS 2 interface** (joint states, wrist wrench, compliance targets,
+  joint trajectories, gripper action, TF, RViz markers),
+* a **500 Hz Cartesian compliance (admittance) controller**, like UR force mode or FZI's
+  `cartesian_compliance_controller`,
+* a **scripted, force-guided expert** that solves the task on randomised layouts,
+* a **Gymnasium environment** and a **demonstration recorder** for imitation / reinforcement
+  learning, with bit-exact replay,
+* a **build agent**: NVIDIA Nemotron on Nebius Token Factory reads a harness spec, decides
+  every step, checks each result and recovers from failures, driving the robot's
+  force-controlled skills as tools (section 5),
+* **NVIDIA Isaac GR00T N1.7**, a vision-language-action model, fine-tuned to route the wire
+  from camera images, with force-controlled seating for the snap-in (section 5),
+* **Mission Control**, a web app to start builds and watch them live in 3D: who is moving the
+  robot (GR00T, force-controlled seating, the expert), every decision of the planner, the
+  forces ([`docs/webapp.md`](docs/webapp.md)),
+* a **physics benchmark suite** that measures the simulated wire against beam theory, with an
+  Isaac Sim port for comparison (section 8).
+
+![cell](docs/media/cell.png)
 
 ---
 
@@ -68,10 +113,7 @@ in WSL, ROS 2 Jazzy installed from apt (`/opt/ros/jazzy`).
 # in the Ubuntu (WSL) terminal
 mkdir -p ~/harness_ws/src
 cd ~/harness_ws/src
-# copy the zip from Windows (adjust the user name), then unpack it
-cp /mnt/c/Users/<you>/Downloads/wire_harness_robot.zip .
-sudo apt install -y unzip
-unzip wire_harness_robot.zip            # -> ~/harness_ws/src/wire_harness_robot
+git clone https://github.com/rezahendi/Wire-Harness-Robot-2.git wire_harness_robot
 
 bash wire_harness_robot/scripts/setup_wsl.sh   # apt + pip dependencies (once)
 
@@ -490,8 +532,10 @@ python -m harness_agent.groot_replay_server data/harness_route      # GPU-free s
 
 The full runbook for a Nebius AI Cloud GPU VM (setup, smoke test through GR00T's server in
 replay mode, fine-tuning, closed-loop evaluation, measured times and costs) is in
-[`docs/groot.md`](docs/groot.md). The first fine-tuning run (403 demos, 6,000 steps) took
-about 80 minutes on one L40S.
+[`docs/groot.md`](docs/groot.md). The current model (`route_v6`: about 2,700 episodes, among
+them 228 takeovers from GR00T's own stuck states, 20,000 steps at batch 32) trains in about 4.5
+hours on one L40S. On the 40 test boards, GR00T with force-controlled seating routes 86% of the
+wires and the full system 97% (Results, at the top).
 
 ## 6. Configuration and randomisation
 
@@ -627,5 +671,6 @@ out of the colcon workspace.
 * Nothing here has been measured against a real harness bundle yet. The two measurements
   that would anchor everything else: bending stiffness of a real bundle (clamp a length
   horizontally, measure the droop, invert the elastica) and its friction on the board.
-* Next: behaviour cloning / diffusion policy on the demos, image observations (wrist camera
-  `wrist` is already in the model), branches (Y-splits) and multiple wires, a real UR5e.
+* Next: more GR00T training rounds on its own mistakes (DAgger) and a dedicated snap-in skill,
+  so GR00T does more of the routing on its own; branches (Y-splits) and multiple wires; a real
+  UR5e.

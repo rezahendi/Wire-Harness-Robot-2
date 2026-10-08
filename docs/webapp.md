@@ -111,6 +111,10 @@ same page as one file with three.js from a CDN, for hosts that wrap a page in th
 skeleton) and `data/`: each build's events with only what the page draws, its camera-check
 images, the drawings and `results.json`. File paths and server addresses are left out.
 
+The public copy is the `gh-pages` branch, served by GitHub Pages at
+<https://rezahendi.github.io/Wire-Harness-Robot-2/>: the contents of `site/` without `page.html`,
+plus an empty `.nojekyll`.
+
 `?capture` puts the page in frame-exact mode for recording a video: `window.__mc.render(t)`
 draws the build at robot time `t`, and `__mc.view`, `__mc.caption` and `__mc.ui` set the
 camera, a caption and which parts of the page show.

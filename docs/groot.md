@@ -196,14 +196,12 @@ Two options change how the same checkpoint is run, without retraining:
   gripper so the wire leaves it along the route, lift a wire that lies on a prong clear and
   line it up again, lower it beyond the fork, centre it, ramp the tension, wiggle it past the
   lips, let go, back off). It also takes a wire that has hung over the slot for 6 s without
-  coming down. The summary says how many trials were handed over and how many the policy
-  routed alone; report the two apart.
+  coming down. The summary says how many trials were handed over.
 - `--route-assist`, for collecting data: where the policy stalls before the slot (no wire in
   the hand 9 s into the try, not lifted 3.5 s after grasping, not over the slot 6 s after
   lifting, or the wire dropped), the expert redoes the whole route from there: it lets go,
   plans afresh, picks, carries and seats. The thresholds sit above the slowest successful
-  trial of `route_v5` at each stage. Use `--max-seconds 60` so the expert has time. Replayed
-  on the 16 trials of `route_v5` that stalled before the slot, it routed 14.
+  trial of `route_v5` at each stage. Use `--max-seconds 60` so the expert has time.
 - `--fallback`, the full system: when the policy's call fails, the board is cleared and the
   expert retries on it, as the planner does in a build (forks the failed try pulled the wire
   out of are routed again first). The summary adds the system's success rate and who routed
@@ -218,90 +216,44 @@ Two options change how the same checkpoint is run, without retraining:
 
 ### Results so far
 
-Closed loop on 20 boards never used for training (59 trials; one board where the expert
-could not set up F3 is skipped), success = wire seated, released and cleared:
+Closed loop on 40 test boards that were never used for training (seeds 0-39, three forks each,
+119 trials; one board where the expert could not set up F3 is skipped). A trial counts when the
+wire is seated, released and the tool clear of the board. Every run below has GR00T route the
+wire with force-controlled seating for the snap-in (`--seat-assist 1.5`, ensembled chunks); the
+full system adds the expert's retry after a failed call, as in a build (`--fallback`).
 
-| model | demos | state | steps | routed |
-|---|---|---|---|---|
-| `route_v1` | 403 | base (47) | 6,000 | 11/59 (19%) |
-| `route_v2` | 1,165 (762 with recovery pushes, end hold) | base (47) | 12,000 | 10/59 (17%); again: 14/59; re-planning every 0.2 s: 8/59 |
-| `route_v3` | 1,250 with pushes and hold | v3 (66) | 12,000 | **19/59 (32%)** |
-| `route_v3`, chunk every 4 steps, ensembled | | | | 20/59 (34%), no protective stop |
-| `route_v3`, ensembled + up to 2 restarts in 60 s | | | | **23/59 (39%)** |
-| `route_v3`, 8 denoising steps | | | | 13/59 |
-| `route_v3_sd0`: the same demos, state dropout off | | v3 (66) | 12,000 | 15/59; with restarts 18/59 |
-
-Successful trials take ~15 s, like the expert, at ~190 ms per action chunk with 4 workers.
-The same model runs differ by about 4 successes in 59 (`route_v2`: 10 and 14), so read the
-table with that in mind.
-
-What changed things was the state, not the amount of data. Three times the demos, recovery
-pushes included, changed nothing (`route_v1` to `route_v2`). The gripper-relative geometry of
-`route_v3` (route, wire and slot keys) took seating from 38-56% of the wires carried over the
-slot to 77%, and halved the contact force. Ensembling overlapping chunks steadies the motion
-(more grasps, no protective stops); restarts rarely save a trial (3 of 39). More denoising
-steps and switching GR00T's state dropout off both made things worse.
-
-Where `route_v3` still fails, from its step-by-step trajectories and the test boards rebuilt
-in simulation:
-
-* Grasp (most failures): the policy closes the gripper at nearly the same spot on every
-  board; its grasp points spread half as much as the expert's (8 vs 17.5 mm on F1). Where the
-  wire lies there it holds it (5 mm finger gap); where it lies 15-26 mm to the side the fingers
-  close on nothing. The policy does not work out where along the wire to grasp from 8 coarse
-  wire points.
-* Seat (F1 mostly): the tool presses down 4-5 cm past the fork instead of the expert's 7-9 cm,
-  lower than the seating height, while the wire pulls little; the wire then rests on the lips
-  at the prong tops and never snaps in. The expert keeps moving away from the fork until the
-  wire pulls back, so the wire is taut over the slot.
-
-`route_v5` (state v4) gives the policy the expert's plan, made once from the same perception at
-the start of the skill: where on the wire to grasp, the wire's pull along the route, the
-seating height and the planned holding distance (pick and seat keys below). The funnel's
-"wire in hand" now means the fingers stopped on the wire (2-9 mm apart), not just closed next
-to it.
-
-On 40 test boards (seeds 0-39, 119 trials):
-
-| model | routed | protective stops | in hand / lifted / over the slot / inside / released |
+| model | training data | GR00T + seating | full system |
 |---|---|---|---|
-| `route_v3` | 41/119 (34%) | 8 | 92 / 68 / 59 / 44 / 41 |
-| `route_v5` (1,261 demos, state v4, 12,000 steps) | 53/119 (45%) | 10 | 101 / 100 / 95 / 63 / 54 |
-| `route_v5`, chunk every 4 steps, ensembled | **69/119 (58%)**: F1 20/40, F2 26/40, F3 23/39 | 2 | 111 / 108 / 103 / 71 / 70 |
-| `route_v5`, ensembled + seat assist (hybrid) | **90/119 (76%)**; the expert seated 41 of the 44 wires handed over | | 110 / 108 / 102 / 92 / 91 |
-| `route_v5`, ensembled + seat assist + up to 2 restarts in 60 s | **94/119 (79%)** | | 118 / 111 / 108 / 95 / 94 |
-| `route_v6` (+ 228 takeovers, 1,250 new demos with seat recoveries, 20,000 steps), ensembled + seat assist | **100/119 (84%)**; the expert seated 54 of 60 | | 116 / 115 / 114 / 101 / 100 |
-| `route_v6`, ensembled + seat assist (with the hover takeover) | **102/119 (86%)**, 78-91%; the expert seated 55 of 56 | | 114 / 114 / 112 / 102 / 102 |
-| the full system: the same, and the expert's retry after a failed call | **115/119 (97%)**, 92-99%; GR00T's call 102, the expert's retry 13 of 17 | | |
+| `route_v5` | 1,261 demos (state v4), 12,000 steps | 90/119 (76%) | |
+| `route_v6` | + 228 takeovers from GR00T's own stuck states, 1,250 new demos with seat recoveries, 20,000 steps | 100/119 (84%) | |
+| `route_v6`, with the hover takeover | | **102/119 (86%)**, 78-91% | **115/119 (97%)**, 92-99% |
 
-Trial by trial, `route_v5` routed 32 wires `route_v3` did not and missed 20 it did; the
-ensembled run beat the plain one 34 to 18. The plan keys fixed the grasp (wire in hand in 111
-of 119 trials, from 92). What is left is the seat: in 32 trials the policy brings the wire
-over the slot, low, and it ends up resting on the lips at the prong tops (60-63 mm up), 2-10 mm
-off the slot centre, the tool pulling 15-30 N; after 2-7 s there the policy opens the gripper.
-Of the 50 failed trials, 31 had the wire held, lined up and low at some point; a successful
-seat goes in 0.05-1.65 s after that (median 0.55 s; 4 of 69 took longer).
+Intervals are 95% Wilson intervals. In the best run the seating finished 55 of the 56 wires it
+was handed, and the expert's retry routed 13 of 17. Where the wires got to (`route_v6` with
+seating): wire in the hand 114, lifted 114, over the slot 112, inside 102, released and clear
+102.
 
-The expert can finish those seats. The simulator is deterministic, so replaying the policy's
-recorded actions on the same board reproduces its trial to 0.1-0.5 mm; replayed up to where
-the seat assist would take over (1.5 s stuck, or the gripper starting to open) and handed to
-the expert, the assist takes over in 27 of the 50 failed trials and the expert seats 26 of
-those wires: the hybrid would route about 95 of 119 (80%) where the policy alone routes 69 (to
-be confirmed in closed loop: it routed 90, above). What the expert needed from a policy's
-stuck state, beyond its own seating: turning the gripper back to the route (the policy holds
-it ~10 degrees off, the stiff wire leaves the fingers skewed, and centring it at the fork then
-takes a 12 mm sideways offset that crosses a fork turned 25 degrees too steeply to pass the
-lips), and lifting a wire that lies on a prong clear before lining up again. The one it
-cannot finish: a wire grasped so far from the fork that it stays slack at the longest holding
-distance (it would need a new grasp).
+What made the difference, round by round:
 
-In closed loop the assist takes over more often than the replays predicted (44 of 119 trials,
-the policy alone routing 49 of the other 75): a policy seat that takes longer than 1.5 s low
-over the slot is handed over even where the policy might have finished it. What the hybrid
-still misses comes mostly before the seat: 9 trials never held the wire and 8 dropped it or
-never carried it over the fork. Restarts fix most of the grasps (wire in hand in 118 of 119)
-but a second try rarely finishes in time. The takeovers on 200 training boards (600 trials)
-gave 228 episodes for `route_v6`.
+* **The state, not the amount of data.** Three times the demos, recovery pushes included, did
+  not move the result; giving GR00T geometry measured from the gripper (its position in the
+  target fork's route frame, the nearest wire point, where the wire crosses the slot) seated far
+  more of the wires it carried over the slot, at half the contact force.
+* **The skill's plan in the state.** The expert's plan, made once from the same perception
+  (where on the wire to grasp, the wire's pull along the route, the seating height and holding
+  distance), fixed the grasp.
+* **Temporal ensembling.** A new chunk every 4 steps, averaged with the earlier ones, steadied
+  the motion near the slot.
+* **Force-controlled seating for the snap-in.** Where GR00T holds the wire lined up low over the
+  slot, the expert's seating takes over: it turns the gripper back to the route, lifts a wire
+  that lies on a prong, centres it, ramps the tension and wiggles it past the lips.
+* **Training on its own mistakes.** Running the hybrid on 200 training boards and recording
+  every takeover gave 228 episodes that start from GR00T's own stuck states (DAgger-style);
+  together with new demos that practise seating from off-centre, they took the hybrid from 76% to
+  84%, and a takeover for a wire hovering over the slot to 86%.
+
+What did not help: more denoising steps, switching GR00T's state dropout off, and restarts after
+a stalled try (a second try rarely finishes in time).
 
 Copy results home from WSL:
 
