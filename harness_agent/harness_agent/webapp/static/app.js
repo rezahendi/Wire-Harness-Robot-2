@@ -1211,7 +1211,8 @@ const capture = {
     setPlaying(false);
     const sc = V.scene || {};
     return { t0: tStart(), t1: tEnd(), calls: V.calls.map((c) => c && { name: c.name, arguments: c.arguments, t0: c.t_start, t1: c.t_end }),
-             dists: V.dists, spans: actorSpans(), forks: sc.forks, holder: sc.holder, board_z: sc.board_z };
+             dists: V.dists, spans: actorSpans(), forks: sc.forks, holder: sc.holder, board_z: sc.board_z,
+             clamp: (sc.bodies && sc.static && sc.static[sc.bodies.indexOf('clamp')]) || null };
   },
   render(t) {                                  // draw everything at robot time t, now
     if (T3) { const st = $('stage'); if (st.clientWidth !== T3.cw || st.clientHeight !== T3.ch) resize(); }
@@ -1270,7 +1271,13 @@ const capture = {
     if ('wide' in opts) document.body.classList.toggle('video', !!opts.wide);     // no left column: a bigger 3D view
   },
   debug: () => T3 && { w: T3.w, h: T3.h, aspect: T3.camera.aspect, buffer: [T3.renderer.domElement.width, T3.renderer.domElement.height],
-                       stage: (() => { const r = $('stage').getBoundingClientRect(); return [r.width, r.height]; })() },
+                       stage: (() => { const r = $('stage').getBoundingClientRect(); return [r.width, r.height]; })(),
+                       camera: T3.camera.position.toArray(), target: T3.controls.target.toArray(), fov: T3.camera.fov },
+  project(pts) {                               // world points (metres) -> pixels on the 3D view, to frame a shot
+    if (!T3) return null;
+    const v = new THREE.Vector3();
+    return pts.map((p) => { v.set(p[0], p[1], p[2]).project(T3.camera); return [(v.x + 1) / 2 * T3.w, (1 - v.y) / 2 * T3.h]; });
+  },
   theme: (th) => setTheme(th),
   tab: (name) => showTab(name)
 };
