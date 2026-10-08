@@ -10,6 +10,7 @@ wrong, NVIDIA Isaac GR00T N1.7, fine-tuned on Nebius AI Cloud, moves the arm fro
 and a force-controlled arm finishes the snap-in, inserts the connector and steps in when a step
 fails. Built for the Nebius x NVIDIA Global AI Hackathon (Physical AI).
 
+**[Video (2:42)](https://www.youtube.com/watch?v=RA8w_iiMOIQ)** ·
 **[Live demo: Mission Control replaying real builds](https://rezahendi.github.io/Wire-Harness-Robot-2/)**
 (no install, no login: recorded runs of Nemotron and GR00T, replayed in 3D in the browser)
 
